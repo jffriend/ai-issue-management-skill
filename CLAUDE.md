@@ -19,7 +19,8 @@ this repo's own `docs/solutions/` (four entries carried over from that
 project, documenting real bugs in this exact code before extraction —
 read them before touching the read-back or delta-write logic).
 
-See `README.md` for the config schema, setup, and what the engine guarantees.
+See `docs/SETUP.md` for setup and the config schema, `docs/USAGE.md` for
+day-to-day commands, and `docs/CONCEPTS.md` for what the engine guarantees.
 
 ## You are the coordinator, never the doer
 
