@@ -66,7 +66,15 @@ class DesignField(unittest.TestCase):
 
 
 class PlanDerived(unittest.TestCase):
-    """The parenting rule's mechanical test."""
+    """The parenting rule's mechanical test.
+
+    `plan_dir` is passed explicitly on every call (KTD3) -- `is_plan_derived`
+    no longer reads a hardcoded `PLAN_DIR` module constant. `"docs/plans/"`
+    here is Photos' own value; `PluckdPlanDerived` below proves the same
+    function works correctly against a distinct `plan_dir`.
+    """
+
+    PLAN_DIR = "docs/plans/"
 
     PLAN_LINK = (
         "**Design:** [U2 of the finish-library-consolidation plan]"
@@ -75,13 +83,16 @@ class PlanDerived(unittest.TestCase):
     )
 
     def test_link_into_docs_plans_is_plan_derived(self):
-        self.assertTrue(T.is_plan_derived("body\n\n" + self.PLAN_LINK + "\n"))
+        self.assertTrue(
+            T.is_plan_derived("body\n\n" + self.PLAN_LINK + "\n", self.PLAN_DIR))
 
     def test_design_none_is_not_plan_derived(self):
-        self.assertFalse(T.is_plan_derived("body\n\n**Design:** none\n"))
+        self.assertFalse(
+            T.is_plan_derived("body\n\n**Design:** none\n", self.PLAN_DIR))
 
     def test_absent_design_is_not_plan_derived(self):
-        self.assertFalse(T.is_plan_derived("body with no design field\n"))
+        self.assertFalse(
+            T.is_plan_derived("body with no design field\n", self.PLAN_DIR))
 
     def test_link_to_the_consolidation_plan_is_not_plan_derived(self):
         # photo-consolidation-plan.md is the narrative, not docs/plans/.
@@ -89,12 +100,31 @@ class PlanDerived(unittest.TestCase):
             "**Design:** [Phase 5.1](https://github.com/jffriend/photo-consolidation/"
             "blob/main/photo-consolidation-plan.md#phase-51--unify)\n"
         )
-        self.assertFalse(T.is_plan_derived(body))
+        self.assertFalse(T.is_plan_derived(body, self.PLAN_DIR))
 
     def test_docs_plans_elsewhere_in_the_body_does_not_count(self):
         # Only the Design: field decides. A mention in prose is not a design link.
         body = "The units live in docs/plans/ somewhere.\n\n**Design:** none\n"
-        self.assertFalse(T.is_plan_derived(body))
+        self.assertFalse(T.is_plan_derived(body, self.PLAN_DIR))
+
+
+class PluckdPlanDerived(unittest.TestCase):
+    """The same mechanical test against a distinct `plan_dir`.
+
+    Pluckd's config (tests/fixtures/pluckd.config.json) sets
+    design_line_required=false, so file_issue.sh never calls this function
+    for Pluckd today -- but the function itself must not be over-fit to
+    Photos' path, since a future consumer could set design_line_required
+    true with its own plan_dir.
+    """
+
+    def test_a_link_into_the_configured_plan_dir_is_plan_derived(self):
+        body = "**Design:** [U1](https://github.com/jffriend/pluckd/blob/main/design/plans/u1.md)"
+        self.assertTrue(T.is_plan_derived(body, "design/plans/"))
+
+    def test_a_link_into_docs_plans_does_not_count_under_a_different_plan_dir(self):
+        body = "**Design:** [U1](https://github.com/jffriend/pluckd/blob/main/docs/plans/u1.md)"
+        self.assertFalse(T.is_plan_derived(body, "design/plans/"))
 
 
 class SignificantWords(unittest.TestCase):

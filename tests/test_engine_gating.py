@@ -43,6 +43,20 @@ from pathlib import Path
 
 TESTS = Path(__file__).resolve().parent
 REPO = TESTS.parent
+BOARD_SH = REPO / "board.sh"
+
+# The Photos-shaped config -- read from the actual shipped example, not a
+# hand-copied literal, so these tests prove the example.json itself drives
+# the same behavior the old hardcoded script did (U3's first scenario: "a
+# Photos-shaped config drives identical behavior to before").
+with open(REPO / "config.example.json", encoding="utf-8") as _fh:
+    PHOTOS_CONFIG = json.load(_fh)
+
+# The Pluckd-shaped config -- a distinct vocabulary (work/bug/decision/
+# plan-parent, no your-run, project board #1, no Design-line requirement),
+# proving the schema is not over-fit to Photos' four shapes.
+with open(TESTS / "fixtures" / "pluckd.config.json", encoding="utf-8") as _fh:
+    PLUCKD_CONFIG = json.load(_fh)
 FILE_ISSUE = REPO / "file_issue.sh"
 
 PLAN_DESIGN = (
@@ -267,10 +281,13 @@ class Harness:
     """A temp dir holding a body file, a fake `gh`, and its response table."""
 
     def __init__(self, body, boards=None, responses=None, probe=None,
-                 board_exits=None):
+                 board_exits=None, config=None):
         self.dir = Path(tempfile.mkdtemp(prefix="file_issue_test_"))
         self.body_file = self.dir / "body.md"
         self.body_file.write_text(body)
+        self.config = PHOTOS_CONFIG if config is None else config
+        self.config_path = self.dir / "config.json"
+        self.config_path.write_text(json.dumps(self.config))
         self.bin = self.dir / "bin"
         self.bin.mkdir()
         gh = self.bin / "gh"
@@ -300,7 +317,14 @@ class Harness:
         The read-back backoff is defaulted to ZERO seconds so the suite
         exercises the retry path without really sleeping. Exactly one test
         deletes it, to prove the production default is non-zero.
+
+        --config is injected automatically, pointing at this harness's own
+        config file, unless the caller already put --config in `args` --
+        which is how a test exercises a bad or missing config on purpose.
         """
+        args = list(args)
+        if "--config" not in args:
+            args = ["--config", str(self.config_path)] + args
         e = dict(os.environ)
         e["PATH"] = path if path is not None else f"{self.bin}:{e['PATH']}"
         e["FAKE_GH_DIR"] = str(self.dir)
@@ -1219,6 +1243,43 @@ class AdoptDelta(unittest.TestCase):
         self.assertIn("--add-blocked-by", argv)
         self.assertEqual("133", argv[argv.index("--add-blocked-by") + 1],
                          "only the link that is not already there is sent")
+
+    def test_an_already_present_blocking_link_is_omitted_and_the_others_are_sent(self):
+        """The `blocks` mirror of the blocked-by test above.
+
+        Photos' original suite only carried this shape for parent and
+        blocked-by; blocking is the third relationship kind `EDIT_ARGS`
+        computes a delta for and needs its own proof.
+        """
+        h = adopt_harness(pre_blocking=[63], post_blocking=[63, 70])
+        r = h.run(*adopt_args(**{"--blocks": "63,70"}), "--no-parent",
+                  "--after", "101", stdin="y\n")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        argv = edit_argv(h)
+        self.assertIsNotNone(argv, "the missing blocking link still has to be written")
+        self.assertIn("--add-blocking", argv)
+        self.assertEqual("70", argv[argv.index("--add-blocking") + 1],
+                         "only the link that is not already there is sent")
+
+    def test_the_position_write_is_issued_even_when_the_position_already_matches(self):
+        """Position is the fourth placement answer, and the ONE relationship
+        kind with no delta-skip, by design. KD2 refuses to reconcile parent,
+        blocked-by and blocks when the server already disagrees, and skips
+        writing them again when the server already agrees -- but adopt does
+        not refuse a reposition (all four placement answers are mandatory,
+        so a position is always named), and there is no `--position` flag on
+        `gh issue edit` to omit in the first place: the write is a separate
+        GraphQL mutation (`updateProjectV2ItemPosition`), issued
+        unconditionally every time. This pins that as intentional, not a gap
+        in the delta logic.
+        """
+        h = adopt_harness(boards=[ADOPT_PRE_BOARD, ADOPT_PRE_BOARD])
+        r = h.run(*adopt_args(), "--no-parent", "--after", "102", stdin="y\n")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        positions = [c for c in h.calls()
+                     if any("updateProjectV2ItemPosition" in a for a in c)]
+        self.assertEqual(1, len(positions),
+                         "the position write is unconditional, not delta-gated")
 
     def test_everything_already_present_issues_no_edit_at_all_and_still_reads_back(self):
         h = adopt_harness(pre_parent="55", pre_blocked=[122], pre_blocking=[63],
@@ -2624,6 +2685,182 @@ class FakeGhRuleOrder(unittest.TestCase):
         for marker in ("boardItemByIssueNumber", "boardMembershipCorroboration"):
             self.assertIn(marker, text,
                           "the fake keys on a marker the script no longer emits")
+
+
+# ---------------------------------------------------------------------------
+# U3. The generalized, config-driven engine.
+#
+# ConfigValidation: a config with zero shapes, or a shape referencing an
+# undefined label, must refuse with a clear offline error rather than a
+# silent default (U3 edge case). PluckdConfig: a Pluckd-shaped config drives
+# correct behavior against a genuinely distinct vocabulary (AE2), proving the
+# schema is not over-fit to Photos' four shapes. BoardShIntegration:
+# board.sh's config-driven query still emits the unchanged self-check line
+# to stderr (U3's integration scenario).
+# ---------------------------------------------------------------------------
+
+class ConfigValidation(unittest.TestCase):
+    """R2/KTD5: the config schema is validated offline, before any network
+    call, naming the field or shape that is wrong -- never a silent default
+    that lets an empty or underspecified vocabulary through."""
+
+    def test_zero_shapes_refuses_with_a_clear_error(self):
+        h = Harness("**Design:** none\n")
+        bad = dict(PHOTOS_CONFIG)
+        bad["shapes"] = []
+        h.config_path.write_text(json.dumps(bad))
+        r = h.run(*full_args(h.body_file), "--no-parent", "--top")
+        self.assertNotEqual(r.returncode, 0)
+        out = r.stdout + r.stderr
+        self.assertIn("zero shapes", out)
+        self.assertFalse(h.called("issue", "create", "--title"))
+
+    def test_a_shape_with_an_empty_labels_list_refuses_naming_the_shape(self):
+        h = Harness("**Design:** none\n")
+        bad = dict(PHOTOS_CONFIG)
+        bad["shapes"] = [{"name": "work", "labels": []}]
+        h.config_path.write_text(json.dumps(bad))
+        r = h.run(*full_args(h.body_file), "--no-parent", "--top")
+        self.assertNotEqual(r.returncode, 0)
+        out = r.stdout + r.stderr
+        self.assertIn("no labels", out)
+        self.assertIn("work", out)
+        self.assertFalse(h.called("issue", "create", "--title"))
+
+    def test_a_shape_missing_the_labels_key_entirely_also_refuses(self):
+        h = Harness("**Design:** none\n")
+        bad = dict(PHOTOS_CONFIG)
+        bad["shapes"] = [{"name": "work"}]
+        h.config_path.write_text(json.dumps(bad))
+        r = h.run(*full_args(h.body_file), "--no-parent", "--top")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no labels", r.stdout + r.stderr)
+
+    def test_a_missing_config_file_refuses_before_any_network_call(self):
+        h = Harness("**Design:** none\n")
+        r = h.run("--config", str(h.dir / "does-not-exist.json"),
+                  *full_args(h.body_file), "--no-parent", "--top")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("--config", r.stdout + r.stderr)
+        self.assertFalse(h.called("issue", "create", "--title"))
+
+    def test_malformed_json_refuses_with_a_clear_error(self):
+        h = Harness("**Design:** none\n")
+        h.config_path.write_text("{not valid json")
+        r = h.run(*full_args(h.body_file), "--no-parent", "--top")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("not valid JSON", r.stdout + r.stderr)
+
+
+class PluckdConfig(unittest.TestCase):
+    """AE2: a Pluckd-shaped config (shapes work/bug/decision/plan-parent, no
+    your-run, project board #1, no Design-line requirement) drives the same
+    four placement questions, applies the vocabulary IT names, and writes to
+    ITS repo -- not Photos'."""
+
+    def test_filing_a_bug_shaped_issue_uses_pluckds_repo_and_label(self):
+        # The read-back re-reads the board, so the SECOND page must already
+        # carry the new issue (#200) -- the same shape ReadBack._harness uses
+        # -- or a correctly wired filing would fail its own read-back.
+        board_after = [
+            (101, "First thing on the board"),
+            (200, "A Pluckd bug"),
+            (102, "Second thing"),
+            (103, "Third thing"),
+        ]
+        h = Harness("Some body, no Design field.\n", config=PLUCKD_CONFIG,
+                    boards=[PRE_BOARD, board_after],
+                    responses=create_responses([], []))
+        r = h.run(
+            "--title", "A Pluckd bug", "--body-file", str(h.body_file),
+            "--shape", "bug", "--no-parent", "--after", "101",
+            "--blocked-by", "none", "--blocks", "none", stdin="y\n",
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        create_call = create_argv(h)
+        self.assertIsNotNone(create_call)
+        self.assertIn("--repo", create_call)
+        self.assertEqual("jffriend/pluckd",
+                         create_call[create_call.index("--repo") + 1])
+        self.assertIn("bug", create_call)
+        # "needs-joe" is Photos-only vocabulary; it must not leak into a
+        # config that never defined it.
+        self.assertNotIn("needs-joe", create_call)
+
+    def test_your_run_is_not_a_recognized_shape_under_pluckds_config(self):
+        h = Harness("Some body.\n", config=PLUCKD_CONFIG)
+        r = h.run(
+            "--title", "T", "--body-file", str(h.body_file),
+            "--shape", "your-run", "--no-parent", "--top",
+            "--blocked-by", "none", "--blocks", "none",
+        )
+        self.assertNotEqual(r.returncode, 0)
+        out = r.stdout + r.stderr
+        self.assertIn("--shape", out)
+        self.assertIn("work, bug, decision, plan-parent", out)
+
+    def test_a_plan_derived_body_does_not_require_a_parent_when_the_config_does_not_require_it(self):
+        # Pluckd's config sets design_line_required=false, so a body whose
+        # Design: field links into plan_dir must NOT trigger the parenting
+        # refusal the way it would under Photos' config.
+        body = (
+            "Some body.\n\n**Design:** [U1](https://github.com/jffriend/pluckd/"
+            "blob/main/docs/plans/2026-01-01-001-feat-x.md#u1)\n"
+        )
+        h = Harness(body, config=PLUCKD_CONFIG)
+        r = h.run(*full_args(h.body_file), "--no-parent", "--top", "--dry-run")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
+class BoardShIntegration(unittest.TestCase):
+    """R2/KTD3: board.sh reads the same --config file file_issue.sh reads,
+    and its self-check line ('pages=N rows=N distinct=N') is unchanged --
+    still written to stderr, still in that shape -- once the underlying
+    GraphQL query is config-driven instead of hardcoding the login and
+    project number."""
+
+    def _env(self, h):
+        env = dict(os.environ)
+        env["PATH"] = f"{h.bin}:{env['PATH']}"
+        env["FAKE_GH_DIR"] = str(h.dir)
+        return env
+
+    def test_the_self_check_line_is_emitted_to_stderr(self):
+        h = Harness("**Design:** none\n")  # sets up the fake gh + a config
+        out_path = h.dir / "board_out.json"
+        r = subprocess.run(
+            ["bash", str(BOARD_SH), "--config", str(h.config_path), str(out_path)],
+            capture_output=True, text=True, env=self._env(h), check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual("", r.stdout,
+                         "the self-check line must go to stderr, not stdout")
+        self.assertRegex(r.stderr, r"pages=\d+ rows=\d+ distinct=\d+")
+        self.assertIn(f"rows={len(DEFAULT_BOARD)} distinct={len(DEFAULT_BOARD)}",
+                      r.stderr)
+
+    def test_config_and_output_path_are_accepted_in_either_order(self):
+        h = Harness("**Design:** none\n")
+        out_path = h.dir / "board_out2.json"
+        r = subprocess.run(
+            ["bash", str(BOARD_SH), str(out_path), "--config", str(h.config_path)],
+            capture_output=True, text=True, env=self._env(h), check=False,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertRegex(r.stderr, r"pages=\d+ rows=\d+ distinct=\d+")
+
+    def test_a_config_missing_owner_refuses_before_any_query(self):
+        h = Harness("**Design:** none\n")
+        bad = dict(PHOTOS_CONFIG)
+        del bad["owner"]
+        h.config_path.write_text(json.dumps(bad))
+        out_path = h.dir / "board_out3.json"
+        r = subprocess.run(
+            ["bash", str(BOARD_SH), "--config", str(h.config_path), str(out_path)],
+            capture_output=True, text=True, env=self._env(h), check=False,
+        )
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("owner", r.stderr)
 
 
 if __name__ == "__main__":

@@ -38,10 +38,13 @@
 # issue.
 #
 # >>> HELP BLOCK START
-# USAGE — two modes. Both answer the same four placement questions.
+# USAGE — two modes. Both answer the same four placement questions. Both
+# require --config, naming the JSON file that supplies this board's repo,
+# owner, project number, shape/label vocabulary and plan-derived rules (see
+# config.example.json).
 #
 #   CREATE a new issue and wire it:
-#     bash scripts/file_issue.sh \
+#     bash file_issue.sh --config config.json \
 #         --title "..." --body-file body.md --shape work \
 #         (--parent N | --no-parent) \
 #         (--after N | --top) \
@@ -50,15 +53,15 @@
 #         [--dry-run]
 #
 #   ADOPT an issue that already exists and wire it:
-#     bash scripts/file_issue.sh --adopt N \
+#     bash file_issue.sh --config config.json --adopt N \
 #         (--parent N | --no-parent) \
 #         (--after N | --top) \
 #         (--blocked-by N,N | --blocked-by none) \
 #         (--blocks N,N | --blocks none) \
 #         [--dry-run]
 #
-#   --shape is one of: work, decision, your-run, plan-parent. It sets the
-#   labels. It belongs to create only.
+#   --shape is one of the names in --config's `shapes` list. It sets the
+#   labels that config names for it. It belongs to create only.
 #
 #   --adopt is mutually exclusive with --title, --body-file and --shape: an
 #   issue that already exists has all three already.
@@ -95,11 +98,12 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="jffriend/photo-consolidation"
-OWNER="jffriend"
-PROJECT_NUMBER=2
-PROJECT_ID="PVT_kwHOAVhgcc4BgorE"
 NEIGHBOURS=3
+# REPO, OWNER, PROJECT_NUMBER, PROJECT_ID, the shape/label vocabulary, the
+# plan-derived path (PLAN_DIR) and whether a Design: line is required at all
+# (DESIGN_LINE_REQUIRED) are no longer hardcoded here. They are read from the
+# JSON file named by --config, once the argument parser below has run --
+# see "Load and validate --config" further down, and config.example.json.
 
 # READ-BACK RETRY BOUND (KD1: retry the READ, never the write).
 #
@@ -169,6 +173,7 @@ READBACK_ATTEMPTS="${FILE_ISSUE_READBACK_ATTEMPTS:-5}"
 READBACK_DELAY="${FILE_ISSUE_READBACK_DELAY:-1}"
 READBACK_WAITED=0   # seconds actually spent waiting, reported in every refusal
 
+CONFIG=""
 TITLE=""
 BODY_FILE=""
 SHAPE=""
@@ -252,6 +257,7 @@ usage() {
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    --config)     CONFIG="${2-}"; shift 2 || die "ERROR: --config needs a value." ;;
     --title)      TITLE="${2-}"; shift 2 || die "ERROR: --title needs a value." ;;
     --body-file)  BODY_FILE="${2-}"; shift 2 || die "ERROR: --body-file needs a value." ;;
     --shape)      SHAPE="${2-}"; shift 2 || die "ERROR: --shape needs a value." ;;
@@ -270,6 +276,53 @@ done
 
 if [ -n "$ADOPT" ]; then MODE=adopt; else MODE=create; fi
 if [ "$MODE" = adopt ]; then NOTHING="Nothing was changed."; else NOTHING="Nothing was created."; fi
+
+# ---------------------------------------------------------------------------
+# Load and validate --config. Everything the header used to hardcode --
+# REPO, OWNER, PROJECT_NUMBER, PROJECT_ID, the shape/label vocabulary, the
+# plan-derived path, and whether a Design: line is required at all -- comes
+# from this one JSON file, read once, here, before any network call. A
+# missing or malformed field fails now, offline, naming the field, rather
+# than surfacing as a confusing GraphQL error deep inside a write.
+# ---------------------------------------------------------------------------
+
+[ -n "$CONFIG" ] || die "ERROR: --config is required, naming the JSON config file for
+       this board (repo, owner, project number, shapes/labels, plan-derived
+       rules -- see config.example.json). $NOTHING"
+[ -f "$CONFIG" ] || die "ERROR: --config names a file that does not exist: $CONFIG"
+command -v jq >/dev/null 2>&1 || die "ERROR: jq is required to read --config and was not found on PATH."
+jq -e . "$CONFIG" >/dev/null 2>&1 || die "ERROR: --config $CONFIG is not valid JSON."
+
+REPO="$(jq -r '.repo // empty' "$CONFIG")"
+OWNER="$(jq -r '.owner // empty' "$CONFIG")"
+PROJECT_NUMBER="$(jq -r '.project_number // empty' "$CONFIG")"
+PROJECT_ID="$(jq -r '.project_id // empty' "$CONFIG")"
+PLAN_DIR="$(jq -r '.plan_dir // empty' "$CONFIG")"
+DESIGN_LINE_REQUIRED="$(jq -r 'if (.design_line_required // false) then "true" else "false" end' "$CONFIG")"
+
+[ -n "$REPO" ] || die "ERROR: config $CONFIG is missing required field: repo"
+case "$REPO" in
+  */*) ;;
+  *) die "ERROR: config $CONFIG's repo must be OWNER/NAME (got: $REPO)." ;;
+esac
+REPO_NAME="${REPO#*/}"
+[ -n "$OWNER" ] || die "ERROR: config $CONFIG is missing required field: owner"
+case "$PROJECT_NUMBER" in
+  ''|*[!0-9]*) die "ERROR: config $CONFIG is missing or has a non-numeric project_number (got: ${PROJECT_NUMBER:-<empty>})." ;;
+esac
+[ -n "$PROJECT_ID" ] || die "ERROR: config $CONFIG is missing required field: project_id
+       (the project board's node id -- needed to write to it). $NOTHING"
+if [ "$DESIGN_LINE_REQUIRED" = "true" ] && [ -z "$PLAN_DIR" ]; then
+  die "ERROR: config $CONFIG sets design_line_required=true but has no plan_dir set."
+fi
+
+SHAPE_COUNT="$(jq -r '(.shapes // []) | length' "$CONFIG")"
+[ "$SHAPE_COUNT" -gt 0 ] || die "ERROR: config $CONFIG defines zero shapes. At least one
+       shape (a name and its labels) is required."
+BAD_SHAPE="$(jq -r '(.shapes // [])[] | select((.labels // []) | length == 0) | .name' "$CONFIG" | head -1)"
+[ -z "$BAD_SHAPE" ] || die "ERROR: config $CONFIG's shape '$BAD_SHAPE' has no labels
+       defined. Every shape needs at least one label."
+SHAPE_NAMES="$(jq -r '[(.shapes // [])[].name] | join(", ")' "$CONFIG")"
 
 # ---------------------------------------------------------------------------
 # The OFFLINE stage of the gate. Nothing in this block touches the network.
@@ -294,15 +347,14 @@ else
   [ -n "$TITLE" ] || die "ERROR: --title is required. Nothing was created."
   [ -n "$BODY_FILE" ] || die "ERROR: --body-file is required. Nothing was created."
   [ -f "$BODY_FILE" ] || die "ERROR: --body-file names a file that does not exist: $BODY_FILE"
-  [ -n "$SHAPE" ] || die "ERROR: --shape is required, one of: work, decision, your-run, plan-parent. Nothing was created."
+  [ -n "$SHAPE" ] || die "ERROR: --shape is required, one of: $SHAPE_NAMES. Nothing was created."
 
-  case "$SHAPE" in
-    work)        LABELS=(--label work) ;;
-    decision)    LABELS=(--label decision --label needs-joe) ;;
-    your-run)    LABELS=(--label your-run --label needs-joe) ;;
-    plan-parent) LABELS=(--label plan) ;;
-    *) die "ERROR: --shape must be one of: work, decision, your-run, plan-parent (got: $SHAPE). Nothing was created." ;;
-  esac
+  SHAPE_LABELS="$(jq -r --arg s "$SHAPE" '(.shapes // [])[] | select(.name == $s) | .labels[]' "$CONFIG")"
+  [ -n "$SHAPE_LABELS" ] || die "ERROR: --shape must be one of: $SHAPE_NAMES (got: $SHAPE). Nothing was created."
+  LABELS=()
+  while IFS= read -r lbl; do
+    [ -n "$lbl" ] && LABELS+=(--label "$lbl")
+  done <<<"$SHAPE_LABELS"
 fi
 
 if [ -n "$PARENT" ] && [ "$NO_PARENT" -eq 1 ]; then
@@ -395,11 +447,14 @@ case "$BLOCKS_LIST" in *BAD*) die "ERROR: --blocks takes issue numbers or the wo
 # this same function is applied to it there.
 parenting_rule() {
   local body_file="$1" design_line
-  if python3 "$SCRIPT_DIR/issue_text.py" plan-derived "$body_file"; then
+  # Whether this rule applies AT ALL is itself config-driven -- Pluckd's
+  # config has no Design-line requirement unless it adds one.
+  [ "$DESIGN_LINE_REQUIRED" = "true" ] || return 0
+  if python3 "$SCRIPT_DIR/issue_text.py" plan-derived --config "$CONFIG" "$body_file"; then
     if [ "$NO_PARENT" -eq 1 ]; then
-      design_line="$(python3 "$SCRIPT_DIR/issue_text.py" design-line "$body_file")"
+      design_line="$(python3 "$SCRIPT_DIR/issue_text.py" design-line --config "$CONFIG" "$body_file")"
       die "ERROR: this issue is plan-derived, so --parent is required and --no-parent is refused.
-       Its Design: field links into docs/plans/ —
+       Its Design: field links into $PLAN_DIR —
 
          $design_line
 
@@ -735,7 +790,7 @@ read_board() {
   # Ordered "<number>\t<title>" lines. A truncated board is fatal, because a
   # truncated board is exactly what hid #164.
   local out="$1"
-  if ! bash "$SCRIPT_DIR/board.sh" "$out" 2>"$BOARD_ERR"; then
+  if ! bash "$SCRIPT_DIR/board.sh" --config "$CONFIG" "$out" 2>"$BOARD_ERR"; then
     printf 'ERROR: the board listing is not trustworthy — %s\n' "$(tr '\n' ' ' <"$BOARD_ERR")" >&2
     printf 'A truncated board reads exactly like a short one. Refusing to go on.\n' >&2
     return 1
@@ -1034,16 +1089,20 @@ board_item_id() {
   # it the distinction and each call site decides for itself.
   local num="$1" marker="${2-}" q id rc
   q="$(mktemp -t file_issue_q)"
+  # $owner/$repo travel as GraphQL VARIABLES, not interpolated into the query
+  # text -- this used to be `owner: "jffriend", name: "photo-consolidation"`
+  # as literal text inside this single-quoted heredoc, disconnected from the
+  # config entirely. Now it reads $OWNER/$REPO_NAME like every other lookup.
   cat >"$q" <<'GRAPHQL'
-query($n: Int!) {
-  repository(owner: "jffriend", name: "photo-consolidation") {
+query($n: Int!, $owner: String!, $repo: String!) {
+  repository(owner: $owner, name: $repo) {
     issue(number: $n) {
       projectItems(first: 20) { nodes { id project { number } } }
     }
   }
 }
 GRAPHQL
-  id="$(gh api graphql -F "query=@$q" -F n="$num" \
+  id="$(gh api graphql -F "query=@$q" -F n="$num" -f owner="$OWNER" -f repo="$REPO_NAME" \
     --jq ".data.repository.issue.projectItems.nodes[] | select(.project.number == $PROJECT_NUMBER) | .id $marker" 2>/dev/null \
     | head -1 | tr -d '[:space:]')"
   rc=$?
@@ -1103,7 +1162,7 @@ board_half() {
   if [ -z "$ITEM_ID" ]; then
     ITEM_ID="$(gh project item-add "$PROJECT_NUMBER" --owner "$OWNER" --url "$URL" --format json | jq -r '.id')"
   fi
-  [ -n "$ITEM_ID" ] && [ "$ITEM_ID" != "null" ] || half_wired "the board (project 2) did not return an item id for #$NUM"
+  [ -n "$ITEM_ID" ] && [ "$ITEM_ID" != "null" ] || half_wired "the board (project $PROJECT_NUMBER) did not return an item id for #$NUM"
 
   if [ "$TOP" -eq 1 ]; then
     gh api graphql -f query='mutation($p:ID!,$i:ID!){updateProjectV2ItemPosition(input:{projectId:$p,itemId:$i}){clientMutationId}}' \

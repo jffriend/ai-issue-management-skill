@@ -1,14 +1,45 @@
 #!/bin/bash
-# scripts/board.sh — run with: bash scripts/board.sh /tmp/board.json
+# board.sh — run with: bash board.sh --config config.json /tmp/board.json
+#
+# --config and the output path may come in either order. --config names the
+# JSON file that supplies OWNER and PROJECT_NUMBER (see config.example.json);
+# this script no longer hardcodes a login or a project number.
 set -u
-OUT="$1"; : > "$OUT"; cursor=""; page=0
+
+CONFIG=""
+OUT=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --config) CONFIG="${2-}"; shift 2 ;;
+    *)        OUT="$1"; shift ;;
+  esac
+done
+
+[ -n "$CONFIG" ] || { echo "ERROR: --config is required, naming the JSON config file (owner, project_number)." >&2; exit 1; }
+[ -f "$CONFIG" ] || { echo "ERROR: --config names a file that does not exist: $CONFIG" >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "ERROR: jq is required to read --config and was not found on PATH." >&2; exit 1; }
+jq -e . "$CONFIG" >/dev/null 2>&1 || { echo "ERROR: --config $CONFIG is not valid JSON." >&2; exit 1; }
+[ -n "$OUT" ] || { echo "ERROR: an output path is required." >&2; exit 1; }
+
+OWNER="$(jq -r '.owner // empty' "$CONFIG")"
+PROJECT_NUMBER="$(jq -r '.project_number // empty' "$CONFIG")"
+[ -n "$OWNER" ] || { echo "ERROR: config $CONFIG is missing required field: owner" >&2; exit 1; }
+case "$PROJECT_NUMBER" in
+  ''|*[!0-9]*) echo "ERROR: config $CONFIG is missing or has a non-numeric project_number (got: ${PROJECT_NUMBER:-<empty>})." >&2; exit 1 ;;
+esac
+
+: > "$OUT"; cursor=""; page=0
 while :; do
   page=$((page + 1))
-  if [ -z "$cursor" ]; then args=(); else args=(-f "cursor=$cursor"); fi
+  if [ -z "$cursor" ]; then
+    args=(-f "owner=$OWNER" -F "project=$PROJECT_NUMBER")
+  else
+    args=(-f "owner=$OWNER" -F "project=$PROJECT_NUMBER" -f "cursor=$cursor")
+  fi
   out=$(gh api graphql -f query='
-query($cursor: String) {
-  user(login: "jffriend") {
-    projectV2(number: 2) {
+query($owner: String!, $project: Int!, $cursor: String) {
+  user(login: $owner) {
+    projectV2(number: $project) {
       items(first: 100, after: $cursor) {
         pageInfo { hasNextPage endCursor }
         nodes {

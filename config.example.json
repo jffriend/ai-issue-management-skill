@@ -1,0 +1,14 @@
+{
+  "repo": "jffriend/photo-consolidation",
+  "owner": "jffriend",
+  "project_number": 2,
+  "project_id": "PVT_kwHOAVhgcc4BgorE",
+  "shapes": [
+    { "name": "work", "labels": ["work"] },
+    { "name": "decision", "labels": ["decision", "needs-joe"] },
+    { "name": "your-run", "labels": ["your-run", "needs-joe"] },
+    { "name": "plan-parent", "labels": ["plan"] }
+  ],
+  "plan_dir": "docs/plans/",
+  "design_line_required": true
+}

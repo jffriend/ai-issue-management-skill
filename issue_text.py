@@ -27,9 +27,15 @@ This module reads text. It calls nothing, writes nothing, and knows nothing
 about GitHub. `scripts/file_issue.sh` shells out to the CLI at the bottom.
 
 CLI (for the bash caller)
-    python3 issue_text.py plan-derived <body-file>   # exit 0 = plan-derived
-    python3 issue_text.py design-line  <body-file>   # prints the Design: line
-    python3 issue_text.py dupes <title> <candidates.json>
+    python3 issue_text.py plan-derived --config <config.json> <body-file>
+        # exit 0 = plan-derived (reads plan_dir from the config)
+    python3 issue_text.py design-line  [--config <config.json>] <body-file>
+        # prints the Design: line
+    python3 issue_text.py dupes [--config <config.json>] <title> <candidates.json>
+
+--config is accepted by every subcommand for a single consistent CLI surface,
+but only `plan-derived` actually reads it (for its `plan_dir` field) --
+`design-line` and `dupes` are pure text operations that need no config.
 """
 
 import json
@@ -45,8 +51,6 @@ _DESIGN_LINE = re.compile(
     r"^\s*(?:[-*+]\s*)?(?:\#{1,6}\s*)?\*{0,2}\s*Design\s*\*{0,2}\s*:?\s*\*{0,2}\s*(.*)$",
     re.IGNORECASE,
 )
-
-PLAN_DIR = "docs/plans/"
 
 
 def design_field(body):
@@ -72,16 +76,18 @@ def design_field(body):
     return None
 
 
-def is_plan_derived(body):
+def is_plan_derived(body, plan_dir):
     """
-    True when the `Design:` field links into `docs/plans/`.
+    True when the `Design:` field links into `plan_dir` (e.g. `docs/plans/`).
 
-    Only the field counts. A mention of `docs/plans/` in the prose is not a
-    design link, and a link to `photo-consolidation-plan.md` is the narrative
-    document, not a plan unit.
+    Only the field counts. A mention of `plan_dir` in the prose is not a
+    design link, and a link to a narrative document elsewhere in the repo is
+    not a plan unit. `plan_dir` is the consuming repo's own config value
+    (KTD3) -- this function no longer reads a hardcoded constant, so a caller
+    that forgets to supply it gets a TypeError, not a silently-wrong default.
     """
     line = design_field(body)
-    return bool(line) and PLAN_DIR in line
+    return bool(line) and plan_dir in line
 
 
 # ---------------------------------------------------------------------------
@@ -303,17 +309,52 @@ def states_prose_ordering(body):
 # ---------------------------------------------------------------------------
 
 
+def _extract_config_flag(args):
+    """Pull a `--config <path>` pair out of `args`, wherever it appears.
+
+    Returns (config_path_or_None, remaining_positional_args). Every
+    subcommand accepts --config for one consistent CLI surface (KTD3); only
+    `plan-derived` requires the value it names.
+    """
+    args = list(args)
+    if "--config" not in args:
+        return None, args
+    i = args.index("--config")
+    if i + 1 >= len(args):
+        print("ERROR: --config needs a value.", file=sys.stderr)
+        sys.exit(2)
+    config_path = args[i + 1]
+    del args[i:i + 2]
+    return config_path, args
+
+
+def load_plan_dir(config_path):
+    """Read the `plan_dir` field out of a JSON config file, or raise."""
+    with open(config_path, encoding="utf-8") as fh:
+        config = json.load(fh)
+    plan_dir = config.get("plan_dir")
+    if not plan_dir:
+        raise SystemExit(
+            f"ERROR: config {config_path} is missing required field: plan_dir")
+    return plan_dir
+
+
 def main(argv):
     if len(argv) < 2:
         print(__doc__.strip(), file=sys.stderr)
         return 2
     cmd = argv[1]
+    config_path, rest = _extract_config_flag(argv[2:])
     if cmd == "plan-derived":
-        with open(argv[2], encoding="utf-8") as fh:
+        if config_path is None:
+            print("ERROR: plan-derived requires --config <path>.", file=sys.stderr)
+            return 2
+        plan_dir = load_plan_dir(config_path)
+        with open(rest[0], encoding="utf-8") as fh:
             body = fh.read()
-        return 0 if is_plan_derived(body) else 1
+        return 0 if is_plan_derived(body, plan_dir) else 1
     if cmd == "design-line":
-        with open(argv[2], encoding="utf-8") as fh:
+        with open(rest[0], encoding="utf-8") as fh:
             body = fh.read()
         line = design_field(body)
         if line is None:
@@ -321,8 +362,8 @@ def main(argv):
         print(line)
         return 0
     if cmd == "dupes":
-        title = argv[2]
-        with open(argv[3], encoding="utf-8") as fh:
+        title = rest[0]
+        with open(rest[1], encoding="utf-8") as fh:
             rows = json.load(fh)
         cands = [(r["number"], r["title"]) for r in rows]
         for number, cand_title, why in possible_duplicates(title, cands):

@@ -1,0 +1,14 @@
+{
+  "repo": "jffriend/pluckd",
+  "owner": "jffriend",
+  "project_number": 1,
+  "project_id": "PVT_kwHOPluckdTestFixture0001",
+  "shapes": [
+    { "name": "work", "labels": ["work"] },
+    { "name": "bug", "labels": ["bug"] },
+    { "name": "decision", "labels": ["decision"] },
+    { "name": "plan-parent", "labels": ["plan"] }
+  ],
+  "plan_dir": "docs/plans/",
+  "design_line_required": false
+}
