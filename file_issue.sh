@@ -673,8 +673,8 @@ probe_gh_capability
 # prompt is answered yes.
 # ---------------------------------------------------------------------------
 
-BOARD_JSON="$(mktemp -t file_issue_board)"
-BOARD_ERR="$(mktemp -t file_issue_boarderr)"
+BOARD_JSON="$(mktemp -t file_issue_board.XXXXXX)"
+BOARD_ERR="$(mktemp -t file_issue_boarderr.XXXXXX)"
 cleanup() { rm -f "$BOARD_JSON" "$BOARD_ERR" "${BOARD_JSON}.2" "${TITLES_JSON:-}" "${ADOPT_BODY:-}" ; }
 trap cleanup EXIT
 
@@ -717,7 +717,7 @@ if [ "$MODE" = adopt ]; then
        Reopen it first if it should be, then re-run this command. $NOTHING" ;;
   esac
 
-  ADOPT_BODY="$(mktemp -t file_issue_adoptbody)"
+  ADOPT_BODY="$(mktemp -t file_issue_adoptbody.XXXXXX)"
   printf '%s' "$ADOPT_JSON" | jq -r '.body // ""' >"$ADOPT_BODY"
   parenting_rule "$ADOPT_BODY"
 
@@ -827,7 +827,7 @@ echo
 if [ "$MODE" = create ]; then
   # The duplicate-title check answers a question that only arises for an issue
   # that does not exist yet, so adopt mode skips it.
-  TITLES_JSON="$(mktemp -t file_issue_titles)"
+  TITLES_JSON="$(mktemp -t file_issue_titles.XXXXXX)"
   gh issue list --repo "$REPO" --state open --limit 500 --json number,title >"$TITLES_JSON" 2>/dev/null \
     || die "ERROR: could not list open issues to check for duplicates. Nothing was created."
   DUPES="$(python3 "$SCRIPT_DIR/issue_text.py" dupes "$TITLE" "$TITLES_JSON")"
@@ -1088,7 +1088,7 @@ board_item_id() {
   # that cannot tell the two apart cannot pick the right refusal, so this hands
   # it the distinction and each call site decides for itself.
   local num="$1" marker="${2-}" q id rc
-  q="$(mktemp -t file_issue_q)"
+  q="$(mktemp -t file_issue_q.XXXXXX)"
   # $owner/$repo travel as GraphQL VARIABLES, not interpolated into the query
   # text -- this used to be `owner: "jffriend", name: "photo-consolidation"`
   # as literal text inside this single-quoted heredoc, disconnected from the
