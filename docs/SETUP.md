@@ -28,6 +28,7 @@ You'll do four things: add this repo's code to yours, tell it which board and re
    - The template's own header comment names every placeholder it needs filled in.
    - `{{BOARD_NAME}}` — a short name for your project's board, e.g. "the Roadmap board" or "project board #1".
    - `{{FILE_ISSUE_CMD}}` — the exact command your repo uses to invoke the engine, e.g. `bash scripts/file_issue.sh`.
+   - `{{CONFIG_PATH}}` — the repo-relative path to your own `config.json`, e.g. `scripts/file-issue.config.json`. Needed even when `{{FILE_ISSUE_CMD}}` is a wrapper that hides this path, because the skill reads `human_review_required` from it directly.
    - `{{SHAPES_LIST}}` — the shape names and a one-line meaning of each, copied from the `shapes` list in your own `config.json`.
    - `{{CONVENTIONS_DOC}}` — the path to your own repo's conventions doc, the place that documents issue-body shape and how ordering constraints get recorded.
    - `{{DESIGN_LINE_BLOCK}}` — a paragraph to keep only if your config sets `design_line_required: true`, and to delete otherwise.
