@@ -1,0 +1,11 @@
+{
+  "repo": "jffriend/ai-issue-management-skill",
+  "owner": "jffriend",
+  "project_number": 3,
+  "project_id": "PVT_kwHOAVhgcc4BiBDN",
+  "shapes": [
+    { "name": "work", "labels": ["work"] }
+  ],
+  "plan_dir": "docs/plans/",
+  "design_line_required": false
+}
