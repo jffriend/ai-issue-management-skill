@@ -299,6 +299,7 @@ PROJECT_NUMBER="$(jq -r '.project_number // empty' "$CONFIG")"
 PROJECT_ID="$(jq -r '.project_id // empty' "$CONFIG")"
 PLAN_DIR="$(jq -r '.plan_dir // empty' "$CONFIG")"
 DESIGN_LINE_REQUIRED="$(jq -r 'if (.design_line_required // false) then "true" else "false" end' "$CONFIG")"
+HUMAN_REVIEW_REQUIRED="$(jq -r '.human_review_required // "required"' "$CONFIG")"
 
 [ -n "$REPO" ] || die "ERROR: config $CONFIG is missing required field: repo"
 case "$REPO" in
@@ -315,6 +316,11 @@ esac
 if [ "$DESIGN_LINE_REQUIRED" = "true" ] && [ -z "$PLAN_DIR" ]; then
   die "ERROR: config $CONFIG sets design_line_required=true but has no plan_dir set."
 fi
+case "$HUMAN_REVIEW_REQUIRED" in
+  required|optional|agent) ;;
+  *) die "ERROR: config $CONFIG's human_review_required must be one of: required,
+       optional, agent (got: $HUMAN_REVIEW_REQUIRED)." ;;
+esac
 
 SHAPE_COUNT="$(jq -r '(.shapes // []) | length' "$CONFIG")"
 [ "$SHAPE_COUNT" -gt 0 ] || die "ERROR: config $CONFIG defines zero shapes. At least one

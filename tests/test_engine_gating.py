@@ -2751,6 +2751,44 @@ class ConfigValidation(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("not valid JSON", r.stdout + r.stderr)
 
+    def test_human_review_required_optional_is_accepted(self):
+        h = Harness("**Design:** none\n")
+        bad = dict(PHOTOS_CONFIG)
+        bad["human_review_required"] = "optional"
+        h.config_path.write_text(json.dumps(bad))
+        r = h.run(*full_args(h.body_file), "--no-parent", "--top", "--dry-run")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_human_review_required_absent_behaves_like_required(self):
+        h = Harness("**Design:** none\n")
+        assert "human_review_required" not in PHOTOS_CONFIG
+        r = h.run(*full_args(h.body_file), "--no-parent", "--top", "--dry-run")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_human_review_required_bad_value_refuses_naming_legal_values(self):
+        h = Harness("**Design:** none\n")
+        bad = dict(PHOTOS_CONFIG)
+        bad["human_review_required"] = "sometimes"
+        h.config_path.write_text(json.dumps(bad))
+        r = h.run(*full_args(h.body_file), "--no-parent", "--top")
+        self.assertNotEqual(r.returncode, 0)
+        out = r.stdout + r.stderr
+        self.assertIn("human_review_required", out)
+        self.assertIn("sometimes", out)
+        self.assertIn("required", out)
+        self.assertIn("optional", out)
+        self.assertIn("agent", out)
+        self.assertFalse(h.called("issue", "create", "--title"))
+
+    def test_human_review_required_wrong_case_refuses(self):
+        h = Harness("**Design:** none\n")
+        bad = dict(PHOTOS_CONFIG)
+        bad["human_review_required"] = "REQUIRED"
+        h.config_path.write_text(json.dumps(bad))
+        r = h.run(*full_args(h.body_file), "--no-parent", "--top")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("human_review_required", r.stdout + r.stderr)
+
 
 class PluckdConfig(unittest.TestCase):
     """AE2: a Pluckd-shaped config (shapes work/bug/decision/plan-parent, no
