@@ -709,6 +709,40 @@ class ReadBack(unittest.TestCase):
         self.assertIn("board", (r.stdout + r.stderr).lower())
 
 
+def path_without_gh():
+    """A PATH with every real command still resolvable except `gh`.
+
+    PATH hides whole directories, not individual files, so a hardcoded
+    directory list (e.g. "/usr/bin:/bin") only hides gh on a machine where
+    gh happens to live outside those dirs. GitHub-hosted Ubuntu runners
+    preinstall gh at /usr/bin/gh, alongside jq, python3, and the other
+    coreutils this script also needs -- so excluding that directory to hide
+    gh would break everything else it resolves there too. Forward every
+    other command through one synthetic directory instead.
+    """
+    forward_dir = Path(tempfile.mkdtemp(prefix="file_issue_test_nogh_"))
+    seen = set()
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        try:
+            names = os.listdir(entry)
+        except OSError:
+            continue
+        for name in names:
+            if name == "gh" or name in seen:
+                continue
+            src = Path(entry) / name
+            if not os.access(src, os.X_OK) or src.is_dir():
+                continue
+            try:
+                (forward_dir / name).symlink_to(src)
+            except OSError:
+                continue
+            seen.add(name)
+    return str(forward_dir)
+
+
 class CapabilityProbe(unittest.TestCase):
     """
     `gh` 2.94.0 replaced the node-id lookups this script used to hand-roll with
@@ -798,7 +832,7 @@ class CapabilityProbe(unittest.TestCase):
         self.assertEqual(r.returncode, 0, out)
 
     def test_gh_absent_from_path_refuses_saying_so(self):
-        h, r, out = self._run(probe_rules(), path="/usr/bin:/bin")
+        h, r, out = self._run(probe_rules(), path=path_without_gh())
         self.assertNotEqual(r.returncode, 0, out)
         self.assertIn("REFUSED: gh is not on PATH", out)
         self.assertNotIn("MISSING CAPABILITY", out)
