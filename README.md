@@ -1,4 +1,4 @@
-# file-issue-tool
+# ai-issue-management-skill
 
 A guardrail for putting work on a GitHub Projects (v2) board, so that an
 agent — or a person moving fast — cannot skip the bookkeeping that makes a
@@ -200,9 +200,9 @@ stopped.
 1. **Add this repo as a git submodule**, pinned to a specific commit:
 
    ```bash
-   git submodule add <this-repo-url> path/to/file-issue-tool
-   git -C path/to/file-issue-tool checkout <commit-you're-pinning-to>
-   git add .gitmodules path/to/file-issue-tool
+   git submodule add <this-repo-url> path/to/ai-issue-management-skill
+   git -C path/to/ai-issue-management-skill checkout <commit-you're-pinning-to>
+   git add .gitmodules path/to/ai-issue-management-skill
    ```
 
 2. **Write your own config**, starting from `config.example.json` (see

@@ -17,7 +17,7 @@ argument-hint: [what the issue is about, or "adopt <N>"]
                             (a thin wrapper that execs the submodule's
                             file_issue.sh with your --config baked in) or,
                             with no wrapper:
-                              bash path/to/file-issue-tool/file_issue.sh --config path/to/your-config.json
+                              bash path/to/ai-issue-management-skill/file_issue.sh --config path/to/your-config.json
     {{SHAPES_LIST}}       — the shape names and one-line meaning of each,
                             copied from the `shapes` list in your own
                             config.json (see config.example.json in this
