@@ -1,0 +1,3 @@
+# Every issue goes through file_issue.sh's guardrails when possible; these
+# are the fallback shapes for GitHub's own "New issue" button.
+blank_issues_enabled: false
