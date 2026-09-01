@@ -100,6 +100,14 @@ Whichever value applies, the preview still has to be shown to a human **verbatim
 
 **A surprise always wins, at every value.** A possible duplicate the agent can't confidently rule out, a board position that doesn't match what was asked for, an adopt that unexpectedly moves the issue, or the tool refusing outright — any of those stops the automatic path and hands the decision to a human, even under `agent`. The setting only ever controls the routine, no-surprise case; it never authorizes pushing past something unexpected.
 
+### GitHub's Own "New Issue" Button Skips Every Guard on This Page
+
+The three issue-shape templates under `.github/ISSUE_TEMPLATE/` give GitHub's web "New issue" picker the right shape and the right label for `work`, `bug`, and `investigation` — and `blank_issues_enabled: false` rules out a fourth, fully freeform option. That is all filing through the web UI preserves.
+
+Everything else on this page is `file_issue.sh`-only. Filing from the web skips the board-neighborhood preview, the duplicate-title check, and every placement answer this tool otherwise refuses to let go unstated — no parent, no position, no blocked-by, no blocks, and no read-back proving any of it landed. An issue filed this way sits on the board exactly as unwired as one filed with a bare `gh issue create` before this tool existed.
+
+Each template's own header comment says to use `file_issue.sh` instead when you can. That comment is a reminder, not an enforcement mechanism — stating the boundary precisely here is what keeps a future "well, the template says preferred, not required" reading from becoming the place this tool's guarantees quietly stop applying.
+
 ### Three Guards Are Intentionally Config-Shaped
 
 Three things about this tool's behavior come from your config file rather than being fixed in the code, and that's by design, not a weaker version of the guard. First, your issue-shape vocabulary: what `--shape work` means, and whether "work" is even a valid shape at all, comes entirely from your config's `shapes` list. Second, the parenting rule — whether a plan-derived issue is *required* to carry a parent — is enforced only when your config sets `design_line_required: true`. Third, how much review a filing gets before anything is written is set by `human_review_required`, described above.
