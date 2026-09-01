@@ -5,9 +5,8 @@
   "project_id": "PVT_kwHOAVhgcc4BgorE",
   "shapes": [
     { "name": "work", "labels": ["work"] },
-    { "name": "decision", "labels": ["decision", "needs-joe"] },
-    { "name": "your-run", "labels": ["your-run", "needs-joe"] },
-    { "name": "plan-parent", "labels": ["plan"] }
+    { "name": "bug", "labels": ["bug"] },
+    { "name": "investigation", "labels": ["investigation"] }
   ],
   "plan_dir": "docs/plans/",
   "design_line_required": true

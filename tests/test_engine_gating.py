@@ -445,7 +445,7 @@ class RequiredFlags(unittest.TestCase):
              "--no-parent", "--top", "--blocked-by", "none", "--blocks", "none"]
         )
         self.assertIn("--shape", out)
-        self.assertIn("plan-parent", out)
+        self.assertIn("investigation", out)
 
     def test_missing_parent_answer(self):
         out = self._run([*full_args(self.h.body_file), "--top"])

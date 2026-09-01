@@ -4,7 +4,9 @@
   "project_number": 3,
   "project_id": "PVT_kwHOAVhgcc4BiBDN",
   "shapes": [
-    { "name": "work", "labels": ["work"] }
+    { "name": "work", "labels": ["work"] },
+    { "name": "bug", "labels": ["bug"] },
+    { "name": "investigation", "labels": ["investigation"] }
   ],
   "plan_dir": "docs/plans/",
   "design_line_required": false
