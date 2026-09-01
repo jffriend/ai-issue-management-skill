@@ -54,7 +54,7 @@ with open(REPO / "config.example.json", encoding="utf-8") as _fh:
 
 # The Pluckd-shaped config -- a distinct vocabulary (work/bug/decision/
 # plan-parent, no your-run, project board #1, no Design-line requirement),
-# proving the schema is not over-fit to Photos' four shapes.
+# proving the schema is not over-fit to Photos' three shapes.
 with open(TESTS / "fixtures" / "pluckd.config.json", encoding="utf-8") as _fh:
     PLUCKD_CONFIG = json.load(_fh)
 FILE_ISSUE = REPO / "file_issue.sh"
@@ -478,6 +478,41 @@ class RequiredFlags(unittest.TestCase):
         out = self._run([*full_args(self.h.body_file), "--no-parent", "--after", "101",
                          "--top"])
         self.assertIn("--top", out)
+
+
+class PhotosConfigShapes(unittest.TestCase):
+    """U1: bug and investigation are wired to their own labels under this
+    repo's own shipped config (PHOTOS_CONFIG), and work is unchanged."""
+
+    def _create_call_for(self, shape, title):
+        board_after = [
+            (200, title),
+            (101, "First thing on the board"),
+            (102, "Second thing"),
+        ]
+        h = Harness("**Design:** none\n", boards=[PRE_BOARD, board_after],
+                    responses=create_responses([], []))
+        r = h.run(
+            "--title", title, "--body-file", str(h.body_file),
+            "--shape", shape, "--no-parent", "--top",
+            "--blocked-by", "none", "--blocks", "none", stdin="y\n",
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        create_call = create_argv(h)
+        self.assertIsNotNone(create_call)
+        return create_call
+
+    def test_bug_shape_carries_the_bug_label(self):
+        call = self._create_call_for("bug", "A brand new bug")
+        self.assertIn("bug", call)
+
+    def test_investigation_shape_carries_the_investigation_label(self):
+        call = self._create_call_for("investigation", "A brand new investigation")
+        self.assertIn("investigation", call)
+
+    def test_work_shape_still_carries_the_work_label(self):
+        call = self._create_call_for("work", "A brand new distinct piece of work")
+        self.assertIn("work", call)
 
 
 class ParentingRule(unittest.TestCase):
@@ -2728,7 +2763,7 @@ class FakeGhRuleOrder(unittest.TestCase):
 # undefined label, must refuse with a clear offline error rather than a
 # silent default (U3 edge case). PluckdConfig: a Pluckd-shaped config drives
 # correct behavior against a genuinely distinct vocabulary (AE2), proving the
-# schema is not over-fit to Photos' four shapes. BoardShIntegration:
+# schema is not over-fit to Photos' three shapes. BoardShIntegration:
 # board.sh's config-driven query still emits the unchanged self-check line
 # to stderr (U3's integration scenario).
 # ---------------------------------------------------------------------------

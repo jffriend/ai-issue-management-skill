@@ -2,11 +2,11 @@
 
 **Goal:** wire this tool into your repo so it can file and update issues on your project board, safely.
 
-You'll do four things: add this repo's code to yours, tell it which board and repo to talk to, give your Claude Code agent a skill file that knows how to drive it, and make sure the code is present in any fresh checkout. Each step below has the exact commands to run.
+You'll do five things: add this repo's code to yours, tell it which board and repo to talk to, give your Claude Code agent a skill file that knows how to drive it, give your own repo a matching set of GitHub issue templates, and make sure the code is present in any fresh checkout. Each step below has the exact commands to run.
 
 ## Add the tool to your repo
 
-**Goal:** finish these four steps with a working `config.json` and a filled-in skill file.
+**Goal:** finish these five steps with a working `config.json` and a filled-in skill file.
 
 1. **Add this repo as a git submodule, pinned to a specific commit.**
    - A submodule keeps this tool's code available inside your repo without copying it in, locked to an exact version you choose rather than whatever is newest.
@@ -68,6 +68,14 @@ You'll do four things: add this repo's code to yours, tell it which board and re
 
 The tool checks all of this before making any network call. A missing or empty required field, a `repo` not in `OWNER/NAME` form, a non-numeric `project_number`, an empty `shapes` list, a shape with no labels, or a `human_review_required` value other than `required`/`optional`/`agent` all fail immediately with the specific field named, rather than surfacing later as a confusing error partway through a write.
 
+### Choosing `human_review_required`
+
+There's no automated setup interview for this yet — you're setting the value in `config.json` by hand, the same as every other field above. Ask yourself how much you trust an agent to judge, on its own, whether a filing is a duplicate and whether its board position is right:
+
+- Not sure yet, or this is a new repo? Leave it unset, or set it to `required`. Every filing waits for you to say yes to the preview.
+- You're comfortable letting the agent confirm once you've told it to, but want to approve by default? Use `optional` — say so in the request that asks for the filing ("file this and go ahead"), and it skips waiting; otherwise it waits like `required`.
+- You've watched this tool work and trust it to confirm routine filings unattended? Use `agent`. A possible duplicate, an unexpected board move, or the tool refusing anything still always stops and asks you, no matter which value you pick.
+
 ## Setting up the Size field
 
 **Goal:** give your project board a `Size` field, and know what each option means for your repo.
@@ -89,11 +97,3 @@ What each option means in time is your call, not something this tool or its temp
 | M | |
 | L | |
 | XL | |
-
-### Choosing `human_review_required`
-
-There's no automated setup interview for this yet — you're setting the value in `config.json` by hand, the same as every other field above. Ask yourself how much you trust an agent to judge, on its own, whether a filing is a duplicate and whether its board position is right:
-
-- Not sure yet, or this is a new repo? Leave it unset, or set it to `required`. Every filing waits for you to say yes to the preview.
-- You're comfortable letting the agent confirm once you've told it to, but want to approve by default? Use `optional` — say so in the request that asks for the filing ("file this and go ahead"), and it skips waiting; otherwise it waits like `required`.
-- You've watched this tool work and trust it to confirm routine filings unattended? Use `agent`. A possible duplicate, an unexpected board move, or the tool refusing anything still always stops and asks you, no matter which value you pick.

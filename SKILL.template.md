@@ -149,9 +149,11 @@ Two modes. Both answer the same four questions.
 - **Create** a new issue: give it a title, a file holding its body, and its
   shape. The shape is one of {{SHAPES_LIST}}, and it sets the labels — see
   your config's `shapes` list for the exact names and labels. Build the body
-  file from `.github/ISSUE_TEMPLATE/<shape>.md`: read it, strip the YAML
-  frontmatter block (everything between the two `---` lines), and fill in
-  the remainder.
+  file from `.github/ISSUE_TEMPLATE/<shape>.md`: read it, drop the leading
+  HTML comment (it's addressed to a human using GitHub's web form, not to
+  you), strip the YAML frontmatter block (everything between the two `---`
+  lines), and fill in the remainder. If the frontmatter's `title:` carries a
+  prefix (e.g. `'Decide: '`), start `--title` with that prefix too.
 - **Adopt** an issue that already exists: give `--adopt <N>` instead of the
   title, body and shape — the issue already has all three, and passing them
   is refused.
