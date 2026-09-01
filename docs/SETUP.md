@@ -28,6 +28,7 @@ You'll do four things: add this repo's code to yours, tell it which board and re
    - The template's own header comment names every placeholder it needs filled in.
    - `{{BOARD_NAME}}` — a short name for your project's board, e.g. "the Roadmap board" or "project board #1".
    - `{{FILE_ISSUE_CMD}}` — the exact command your repo uses to invoke the engine, e.g. `bash scripts/file_issue.sh`.
+   - `{{CONFIG_PATH}}` — the repo-relative path to your own `config.json`, e.g. `scripts/file-issue.config.json`. Needed even when `{{FILE_ISSUE_CMD}}` is a wrapper that hides this path, because the skill reads `human_review_required` from it directly.
    - `{{SHAPES_LIST}}` — the shape names and a one-line meaning of each, copied from the `shapes` list in your own `config.json`.
    - `{{CONVENTIONS_DOC}}` — the path to your own repo's conventions doc, the place that documents issue-body shape and how ordering constraints get recorded.
    - `{{DESIGN_LINE_BLOCK}}` — a paragraph to keep only if your config sets `design_line_required: true`, and to delete otherwise.
@@ -58,5 +59,14 @@ You'll do four things: add this repo's code to yours, tell it which board and re
 | `shapes` | array of `{name, labels}` | Your issue-type vocabulary. Each entry's `name` is a valid value for `--shape`; `labels` is the list of GitHub labels applied when an issue of that shape is created. At least one shape is required, and every shape needs at least one label. |
 | `plan_dir` | string | The directory (repo-relative) that plan documents live in — used to recognize a `Design:` line in an issue body as pointing at a real plan. Required if `design_line_required` is `true`; otherwise unused. |
 | `design_line_required` | boolean | Whether a plan-derived issue (one whose body carries a `Design:` line into `plan_dir`) is required to have a parent. Set `false` if your repo has no such convention. |
+| `human_review_required` | string | Who has to confirm a filing before it writes: `required` (a human has to say yes to the preview), `optional` (the agent can confirm on its own only when told to up front), or `agent` (the agent always confirms on its own). Optional — defaults to `required` if omitted. See `docs/CONCEPTS.md` for what each value does. |
 
-The tool checks all of this before making any network call. A missing or empty required field, a `repo` not in `OWNER/NAME` form, a non-numeric `project_number`, an empty `shapes` list, or a shape with no labels all fail immediately with the specific field named, rather than surfacing later as a confusing error partway through a write.
+The tool checks all of this before making any network call. A missing or empty required field, a `repo` not in `OWNER/NAME` form, a non-numeric `project_number`, an empty `shapes` list, a shape with no labels, or a `human_review_required` value other than `required`/`optional`/`agent` all fail immediately with the specific field named, rather than surfacing later as a confusing error partway through a write.
+
+### Choosing `human_review_required`
+
+There's no automated setup interview for this yet — you're setting the value in `config.json` by hand, the same as every other field above. Ask yourself how much you trust an agent to judge, on its own, whether a filing is a duplicate and whether its board position is right:
+
+- Not sure yet, or this is a new repo? Leave it unset, or set it to `required`. Every filing waits for you to say yes to the preview.
+- You're comfortable letting the agent confirm once you've told it to, but want to approve by default? Use `optional` — say so in the request that asks for the filing ("file this and go ahead"), and it skips waiting; otherwise it waits like `required`.
+- You've watched this tool work and trust it to confirm routine filings unattended? Use `agent`. A possible duplicate, an unexpected board move, or the tool refusing anything still always stops and asks you, no matter which value you pick.

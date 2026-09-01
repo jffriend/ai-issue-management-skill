@@ -18,6 +18,16 @@ argument-hint: [what the issue is about, or "adopt <N>"]
                             file_issue.sh with your --config baked in) or,
                             with no wrapper:
                               bash path/to/ai-issue-management-skill/file_issue.sh --config path/to/your-config.json
+    {{CONFIG_PATH}}       — the repo-relative path to your own config.json
+                            (e.g. scripts/file-issue.config.json). Needed
+                            even when {{FILE_ISSUE_CMD}} is a wrapper that
+                            hides this path internally, because Step 4 reads
+                            `human_review_required` from it directly. This
+                            MUST be the same config.json {{FILE_ISSUE_CMD}}
+                            itself loads — if a wrapper bakes in a different
+                            or outdated --config path, Step 4 reads a value
+                            that does not govern what the engine actually
+                            enforces.
     {{SHAPES_LIST}}       — the shape names and one-line meaning of each,
                             copied from the `shapes` list in your own
                             config.json (see config.example.json in this
@@ -197,27 +207,72 @@ If the board listing cannot be trusted, the engine stops rather than filing
 against a partial board. A truncated board once hid an issue well enough that
 a session filed a duplicate of it. Never work around that refusal.
 
-## Step 4 — read the preview, then run it
+## Step 4 — decide who confirms, then run it
 
 The engine ends with `Create it? [y/N]` (or `Wire it? [y/N]` when adopting),
 read from stdin. Under Claude Code stdin is never a terminal, so the answer
 has to be supplied before the process starts.
 
-**You may supply that answer yourself, once you have read the Step 3 output.**
-That is a deliberate decision — see the note below on why it is safe. It is
-not permission to skip the preview. Answering without having read the
-neighbourhood and the duplicate list is confirming blind, and that is still
-the failure this step exists to prevent.
+**Read `human_review_required` from {{CONFIG_PATH}} first** — default to
+`required` if the key is absent, and **default to `required` if {{CONFIG_PATH}}
+itself cannot be read** (missing file, invalid JSON, an unfilled placeholder).
+Never treat an unreadable config as license to self-confirm — a config the
+agent cannot read is a config it cannot have granted `optional` or `agent` on.
+Follow the matching procedure below. Whichever one applies, always **actually
+read** the Step 3 output first (the
+board neighbourhood, the duplicate list, and the summary) and **show it to
+the caller verbatim** before the real run, so the decision is visible to a
+human even when it did not wait for one.
 
-So:
+### `required` — a human has to say yes
 
-1. Run Step 3 and **actually read** the output — the board neighbourhood, the
-   duplicate list, and the summary.
-2. **Show it to the caller verbatim** before the real run, so the decision is
-   visible to a human even though it did not wait for one.
-3. Re-run **the identical command without `--dry-run`**, feeding `y` on
-   stdin, and capture everything it prints. In practice that means piping a
-   single `y` into the run:
+Wait for a reply in the conversation to the preview you just showed. A
+clearly affirmative reply is the confirmation. Anything else — a reply that
+doesn't address that preview, or none at all — means don't file: print the
+exact non-`--dry-run` command for a human to run themselves, and stop there.
+Never answer the prompt yourself under this tier.
+
+### `optional` — self-confirm only if already told to
+
+If the request that asked for this filing already carried approval language
+("file this and go ahead", "you're approved to confirm these yourself"),
+read in plain language rather than a fixed keyword, treat that as sufficient
+— and that same approval covers every other filing carried out as part of
+the same task, not only this one. Absent such language, behave exactly as
+`required`.
+
+### `agent` — self-confirm
+
+Proceed without waiting for or looking for approval language, subject to the
+surprise check below.
+
+### Every tier: stop on a surprise
+
+Self-confirmation (`optional` or `agent`) is never a reason to push past
+something unexpected. Stop and put it to the caller when the Step 3 output
+shows any of:
+
+- a **POSSIBLE DUPLICATE** you cannot confidently rule out;
+- a board position that does not match what was asked for;
+- in adopt mode, **`this MOVES it`** when the intent was to leave the issue
+  where it is — the move will be recorded, but a recorded mistake is still a
+  mistake;
+- anything the engine refuses. Never work around a refusal.
+
+This holds at every tier, including `agent`: the setting decides who answers
+the routine, no-surprise case. It never authorizes pushing past a surprise.
+
+**If no answer comes back under `required` (or `optional` without prior
+approval), do not file.** Print the exact command for a human to run and
+stop there. Stopping is the correct outcome. An unattended filing that waves
+past a surprise, or files with nobody having actually approved it, is worse
+than a filing that waits.
+
+### Once confirmed, run it
+
+Re-run **the identical command without `--dry-run`**, feeding `y` on
+stdin, and capture everything it prints. In practice that means piping a
+single `y` into the run:
 
 ```bash
 printf 'y\n' | {{FILE_ISSUE_CMD}} <the same arguments, no --dry-run>
@@ -227,7 +282,7 @@ This is the one piece of invocation knowledge `--help` does not cover, which
 is why it is written out here. If the answer never arrives the engine exits
 with "Not confirmed. Nothing was created." — the failure is safe.
 
-### Why answering it yourself is safe
+### Why self-confirmation (`optional`, `agent`) is safe when it applies
 
 The confirmation never enforced the engine's guards. The four placement
 refusals, the plan-derived parent rule (if your config requires one), the
@@ -240,28 +295,10 @@ Of those, only one is lossy. A wrongly created issue is visible on the board
 and closed in one command. A wrongly moved priority slot is neither visible
 nor recoverable unless the engine records the slot it came from.
 
-**That is what makes self-confirmation safe here:** an adopt that moves an
-issue comments on it naming both slots, written only after the read-back
-proves the move landed. The slot it came from is recoverable from the issue's
-own timeline.
-
-### Stop and ask anyway when the preview says something you did not expect
-
-Self-confirmation is not a reason to push past a surprise. Stop and put it to
-the caller when the Step 3 output shows any of:
-
-- a **POSSIBLE DUPLICATE** you cannot confidently rule out;
-- a board position that does not match what was asked for;
-- in adopt mode, **`this MOVES it`** when the intent was to leave the issue
-  where it is — the move will be recorded, but a recorded mistake is still a
-  mistake;
-- anything the engine refuses. Never work around a refusal.
-
-**If no answer comes back, do not file.** Print the exact command for a human
-to run and stop there. Stopping is the correct outcome — self-confirmation
-covers a preview that matches what was asked for, and it never covers one of
-these. An unattended filing that waves past a surprise is worse than a
-filing that waits.
+**That is what makes self-confirmation safe when it applies:** an adopt that
+moves an issue comments on it naming both slots, written only after the
+read-back proves the move landed. The slot it came from is recoverable from
+the issue's own timeline.
 
 ### Compare the two runs before you trust the result
 
@@ -296,28 +333,30 @@ it.** When the issue moved, the engine prints a `move recorded` line. If
 instead it prints `WARNING: the move LANDED but recording it FAILED`, the
 wiring is correct and there is nothing to undo — but the slot the issue came
 from is written down nowhere, and the run still exits 0 and still ends with
-the success sentence. That is the one condition under which the permission in
-Step 4 does not hold, so it cannot be allowed to pass silently. Post the
+the success sentence. That is the one condition under which self-confirmation
+(under `optional` or `agent`) does not hold, so it cannot be allowed to pass
+silently. Post the
 comment body the engine printed, with `gh issue comment`, then tell the
 caller it failed and that you posted it by hand. Never treat a zero exit as
 evidence the move record landed.
 
-Then post the **audit comment** on the filed issue. With no human required in
-the loop it is the only record that a filing was sound, so it names each
-judgement rather than summarising them — mirroring the Step 4 stop list one
-for one:
+Then post the **audit comment** on the filed issue — every filing gets one,
+at every value of `human_review_required`, not only a self-confirmed one. It
+names:
 
-- who approved it, saying plainly when that was you rather than a human;
-- the duplicate list, and the verdict on each entry, or `none found`;
-- the position asked for, and the neighbourhood it landed in;
-- in adopt mode, whether the summary said `this MOVES it`, and whether that
-  was intended;
-- whether the two pre-gate blocks were identical;
-- then both runs' pre-gate output, verbatim. That comment is what keeps an
-  unsound confirmation detectable afterwards instead of invisible, and now
-  that no human has to be present it is the only thing that does. Use
-  `gh issue comment` — this is the permitted exception named at the top,
-  because a comment creates no issue and touches no board field.
+- **who approved it** — the human, via a reply to the preview (quote the
+  reply); the human, via approval language already given for the batch
+  (`optional` — quote the exact language relied on, since that is a natural-
+  language judgment call, not a keyword match, and unquoted it can't be
+  checked later); or `agent, self-confirmed`;
+- **whether the stop-on-surprise checks passed** — no possible duplicate, no
+  unexpected board move, no refusal;
+- **the board position filed to.**
+
+That comment is what keeps a confirmation's soundness detectable afterwards
+instead of invisible, whether or not a human was in the loop for this one.
+Use `gh issue comment` — this is the permitted exception named at the top,
+because a comment creates no issue and touches no board field.
 
 ## What this skill does not cover
 
@@ -330,9 +369,15 @@ covers filing.
 ## What this skill must never do
 
 - Write to the board by any route other than {{FILE_ISSUE_CMD}}.
-- Supply the confirmation answer without the Step 3 preview having been run,
-  shown to the caller verbatim, and quoted in the audit comment.
+- Answer the confirmation prompt yourself under `required`, or under
+  `optional` with no approval language already given — under both, that
+  answer belongs to a human.
+- Supply the confirmation answer, under any tier that permits it, without
+  the Step 3 preview having been run, shown to the caller verbatim, and
+  named as the approver in the audit comment.
 - Skip the `--dry-run` preview, or show it to the caller after the
   confirmation rather than before.
+- Push past a stop-on-surprise condition (a possible duplicate, an
+  unexpected board move, or any refusal) at any tier, including `agent`.
 - Work around any refusal the engine raises. Every one of them was paid for.
 - Restate the engine's flags from memory instead of reading its usage.

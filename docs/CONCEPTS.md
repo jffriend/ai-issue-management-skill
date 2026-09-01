@@ -90,17 +90,21 @@ Before showing you a board neighborhood or a duplicate-title check, the tool con
 
 This exists because a silently truncated listing once hid an existing issue well enough that a duplicate of it got filed anyway. Refusing to proceed on an unproven listing is what makes that specific mistake structurally harder to repeat.
 
-### Nothing Writes Without a Human Seeing the Real Preview First
+### Nothing Writes Without a Preview Shown First — Who Confirms Is Configurable
 
 Running with `--dry-run` stops the tool right after it shows you the board neighborhood and any duplicate-title matches — nothing gets created or changed. That preview is the only thing that lets a person catch the two calls this tool can compute but can't actually judge: whether something is a duplicate, and whether a position is right.
 
-An agent can supply its own confirmation on your behalf, but only after that exact preview has been shown to a human **verbatim** — never summarized, never paraphrased. That word is load-bearing: a summary can quietly drop the one duplicate match or the one out-of-place position that mattered, and the confirmation step exists to catch precisely those two judgment calls.
+Who confirms after that preview is a setting — `human_review_required` in your config. `required` (the default) means a human has to say yes to that specific preview before anything is written. `optional` means the agent can confirm on its own, but only when the request that asked for the filing already said so up front; otherwise it behaves like `required`. `agent` means the agent always confirms on its own, once it has shown the preview.
 
-### Two Guards Are Intentionally Config-Shaped
+Whichever value applies, the preview still has to be shown to a human **verbatim** first — never summarized, never paraphrased. That word is load-bearing: a summary can quietly drop the one duplicate match or the one out-of-place position that mattered, and the confirmation step exists to catch precisely those two judgment calls.
 
-Two things about this tool's behavior come from your config file rather than being fixed in the code, and that's by design, not a weaker version of the guard. First, your issue-shape vocabulary: what `--shape work` means, and whether "work" is even a valid shape at all, comes entirely from your config's `shapes` list. Second, the parenting rule — whether a plan-derived issue is *required* to carry a parent — is enforced only when your config sets `design_line_required: true`.
+**A surprise always wins, at every value.** A possible duplicate the agent can't confidently rule out, a board position that doesn't match what was asked for, an adopt that unexpectedly moves the issue, or the tool refusing outright — any of those stops the automatic path and hands the decision to a human, even under `agent`. The setting only ever controls the routine, no-surprise case; it never authorizes pushing past something unexpected.
 
-Every other guard on this page holds identically no matter what your config says. These two are the only places where "it depends on your repo" is a true statement about this tool's behavior.
+### Three Guards Are Intentionally Config-Shaped
+
+Three things about this tool's behavior come from your config file rather than being fixed in the code, and that's by design, not a weaker version of the guard. First, your issue-shape vocabulary: what `--shape work` means, and whether "work" is even a valid shape at all, comes entirely from your config's `shapes` list. Second, the parenting rule — whether a plan-derived issue is *required* to carry a parent — is enforced only when your config sets `design_line_required: true`. Third, how much review a filing gets before anything is written is set by `human_review_required`, described above.
+
+Every other guard on this page holds identically no matter what your config says. These three are the only places where "it depends on your repo" is a true statement about this tool's behavior.
 
 ### A Version Gap in gh Gets Caught Before It Can Leave an Issue Half-Wired
 
