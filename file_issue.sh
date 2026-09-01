@@ -299,7 +299,7 @@ PROJECT_NUMBER="$(jq -r '.project_number // empty' "$CONFIG")"
 PROJECT_ID="$(jq -r '.project_id // empty' "$CONFIG")"
 PLAN_DIR="$(jq -r '.plan_dir // empty' "$CONFIG")"
 DESIGN_LINE_REQUIRED="$(jq -r 'if (.design_line_required // false) then "true" else "false" end' "$CONFIG")"
-HUMAN_REVIEW_REQUIRED="$(jq -r '.human_review_required // "required"' "$CONFIG")"
+HUMAN_REVIEW_REQUIRED="$(jq -r 'if has("human_review_required") then (.human_review_required | tostring) else "required" end' "$CONFIG")"
 
 [ -n "$REPO" ] || die "ERROR: config $CONFIG is missing required field: repo"
 case "$REPO" in

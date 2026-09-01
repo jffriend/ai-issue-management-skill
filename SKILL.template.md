@@ -22,7 +22,12 @@ argument-hint: [what the issue is about, or "adopt <N>"]
                             (e.g. scripts/file-issue.config.json). Needed
                             even when {{FILE_ISSUE_CMD}} is a wrapper that
                             hides this path internally, because Step 4 reads
-                            `human_review_required` from it directly.
+                            `human_review_required` from it directly. This
+                            MUST be the same config.json {{FILE_ISSUE_CMD}}
+                            itself loads — if a wrapper bakes in a different
+                            or outdated --config path, Step 4 reads a value
+                            that does not govern what the engine actually
+                            enforces.
     {{SHAPES_LIST}}       — the shape names and one-line meaning of each,
                             copied from the `shapes` list in your own
                             config.json (see config.example.json in this
@@ -209,8 +214,12 @@ read from stdin. Under Claude Code stdin is never a terminal, so the answer
 has to be supplied before the process starts.
 
 **Read `human_review_required` from {{CONFIG_PATH}} first** — default to
-`required` if the key is absent — and follow the matching procedure below.
-Whichever one applies, always **actually read** the Step 3 output first (the
+`required` if the key is absent, and **default to `required` if {{CONFIG_PATH}}
+itself cannot be read** (missing file, invalid JSON, an unfilled placeholder).
+Never treat an unreadable config as license to self-confirm — a config the
+agent cannot read is a config it cannot have granted `optional` or `agent` on.
+Follow the matching procedure below. Whichever one applies, always **actually
+read** the Step 3 output first (the
 board neighbourhood, the duplicate list, and the summary) and **show it to
 the caller verbatim** before the real run, so the decision is visible to a
 human even when it did not wait for one.
@@ -324,8 +333,9 @@ it.** When the issue moved, the engine prints a `move recorded` line. If
 instead it prints `WARNING: the move LANDED but recording it FAILED`, the
 wiring is correct and there is nothing to undo — but the slot the issue came
 from is written down nowhere, and the run still exits 0 and still ends with
-the success sentence. That is the one condition under which the permission in
-Step 4 does not hold, so it cannot be allowed to pass silently. Post the
+the success sentence. That is the one condition under which self-confirmation
+(under `optional` or `agent`) does not hold, so it cannot be allowed to pass
+silently. Post the
 comment body the engine printed, with `gh issue comment`, then tell the
 caller it failed and that you posted it by hand. Never treat a zero exit as
 evidence the move record landed.
@@ -334,9 +344,11 @@ Then post the **audit comment** on the filed issue — every filing gets one,
 at every value of `human_review_required`, not only a self-confirmed one. It
 names:
 
-- **who approved it** — the human, via a reply to the preview; the human,
-  via approval language already given for the batch (`optional`); or
-  `agent, self-confirmed`;
+- **who approved it** — the human, via a reply to the preview (quote the
+  reply); the human, via approval language already given for the batch
+  (`optional` — quote the exact language relied on, since that is a natural-
+  language judgment call, not a keyword match, and unquoted it can't be
+  checked later); or `agent, self-confirmed`;
 - **whether the stop-on-surprise checks passed** — no possible duplicate, no
   unexpected board move, no refusal;
 - **the board position filed to.**

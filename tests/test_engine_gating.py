@@ -2789,6 +2789,19 @@ class ConfigValidation(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("human_review_required", r.stdout + r.stderr)
 
+    def test_human_review_required_json_false_refuses_rather_than_defaulting(self):
+        # A config author modeling this field on design_line_required (a real
+        # boolean) might write `false`. jq's `//` treats JSON false the same
+        # as absent, which would silently default to "required" instead of
+        # refusing -- masking the mistake. Explicit false must be refused.
+        h = Harness("**Design:** none\n")
+        bad = dict(PHOTOS_CONFIG)
+        bad["human_review_required"] = False
+        h.config_path.write_text(json.dumps(bad))
+        r = h.run(*full_args(h.body_file), "--no-parent", "--top")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("human_review_required", r.stdout + r.stderr)
+
 
 class PluckdConfig(unittest.TestCase):
     """AE2: a Pluckd-shaped config (shapes work/bug/decision/plan-parent, no
