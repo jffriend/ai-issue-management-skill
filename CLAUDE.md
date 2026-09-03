@@ -34,12 +34,9 @@ resist it the same way.
 
 ## Match rigor to lifespan and blast radius
 
-Before writing tooling, state three things: how many times it runs, what it
-writes to, and how long doing it by hand would take. If the manual estimate
-is 15–30 minutes or less, do it by hand — tooling is for scale or for work a
-person can't do accurately by hand. Run-once scratch work gets spot-checks,
-not a verification apparatus. Anything writing to this repo's own board or
-another consumer's repo gets the full apparatus, unchanged.
+General rule is in global CLAUDE.md. Here specifically: this repo's own board
+and any consumer repo it writes to both count as "the library, not scratch" —
+they get the full verification apparatus, unchanged, never spot-checks.
 
 ## Outstanding work is on the board, never in a document
 
@@ -76,13 +73,6 @@ is unchanged, only the illustration is dated.
 Any multi-step plan goes to `temp_plans/<descriptive-name>.md` before doing
 anything else, so it survives a crash. `ce-plan` and `ce-brainstorm` write
 their own durable plans to `docs/plans/`.
-
-## Never cite a line number
-
-To point at code, quote it and name its function. To point at a doc, quote
-it or link to its heading. A line number is right only against the file as
-it was that day and goes wrong silently. Exception: a dated record (an
-audit, a review finding) where the coordinate is part of the evidence.
 
 ## Toolset
 
