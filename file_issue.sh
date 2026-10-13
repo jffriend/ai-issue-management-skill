@@ -1168,6 +1168,13 @@ board_half() {
   if [ -z "$ITEM_ID" ]; then
     ITEM_ID="$(gh project item-add "$PROJECT_NUMBER" --owner "$OWNER" --url "$URL" --format json | jq -r '.id')"
   fi
+  # A board with GitHub's auto-add workflow puts a NEW issue on it before
+  # item-add runs, and item-add then refuses with "Content already exists in
+  # this project" and returns no id. The issue IS on the board, so ask for its
+  # item by number before calling this a failure (pluckd #504, #508).
+  if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ]; then
+    ITEM_ID="$(board_item_by_issue_number "$NUM")"
+  fi
   [ -n "$ITEM_ID" ] && [ "$ITEM_ID" != "null" ] || half_wired "the board (project $PROJECT_NUMBER) did not return an item id for #$NUM"
 
   if [ "$TOP" -eq 1 ]; then
