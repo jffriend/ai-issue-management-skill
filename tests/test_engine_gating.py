@@ -737,6 +737,35 @@ class ReadBack(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("position", (r.stdout + r.stderr).lower())
 
+    def test_a_board_that_auto_adds_new_issues_does_not_half_wire_the_create(self):
+        # A board with GitHub's auto-add workflow puts the new issue on it
+        # before item-add runs, and item-add then refuses with "Content
+        # already exists in this project". pluckd #504 and #508 both came back
+        # HALF-WIRED this way. The id must come from the by-number lookup.
+        responses = create_responses([], [])
+        responses[1] = {"match": "item-add", "exit": 1, "stderr":
+                        "GraphQL: Content already exists in this project "
+                        "(addProjectV2ItemById)\n"}
+        responses.insert(2, {"match": "boardItemByIssueNumber",
+                             "stdout": "PVTI_auto_added\n"})
+        h = Harness(
+            "**Design:** none\n",
+            boards=[PRE_BOARD, [
+                (101, "First thing on the board"),
+                (200, "A brand new distinct piece of work"),
+                (102, "Second thing"),
+                (103, "Third thing"),
+            ]],
+            responses=responses,
+        )
+        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101", stdin="y\n")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        positions = [c for c in h.calls()
+                     if any("updateProjectV2ItemPosition" in a for a in c)]
+        self.assertEqual(1, len(positions), positions)
+        self.assertIn("PVTI_auto_added", " ".join(positions[0]))
+        self.assertIn("board position     ok (after #101)", r.stdout)
+
     def test_missing_from_the_board_fails_loudly(self):
         h = self._harness(board_after=PRE_BOARD)
         r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101", stdin="y\n")
