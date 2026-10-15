@@ -132,7 +132,8 @@ class FlagsMatchTheScript(unittest.TestCase):
         flags = parser_flags()
         for expected in ("--title", "--body-file", "--shape", "--adopt",
                          "--parent", "--no-parent", "--after", "--top",
-                         "--blocked-by", "--blocks", "--dry-run", "--help", "-h"):
+                         "--blocked-by", "--blocks", "--dry-run", "--file-anyway",
+                         "--help", "-h"):
             self.assertIn(expected, flags)
 
     def test_the_gh_remedy_flags_are_only_allowed_because_the_script_prints_them(self):

@@ -55,8 +55,12 @@ bash file_issue.sh --config config.json \
     --dry-run   # always preview first
 ```
 
-Read the board neighborhood and duplicate check before confirming — never
-answer blind. Once #1 ships, the installed skill becomes the front door
+The script no longer asks for a yes: run without `--dry-run` and it writes.
+This repo's `config.json` leaves `human_review_required` unset, so review is
+on. Show Joe the `--dry-run` output verbatim and wait for his yes before
+re-running without `--dry-run`. If the real run exits 3, it found possible
+duplicates and wrote nothing; add `--file-anyway` only once Joe has ruled
+them out. Once #1 ships, the installed skill becomes the front door
 instead of the bare command above.
 
 ## Learnings go in `docs/solutions/` — nowhere else

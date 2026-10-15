@@ -9,5 +9,6 @@
     { "name": "investigation", "labels": ["investigation"] }
   ],
   "plan_dir": "docs/plans/",
-  "design_line_required": true
+  "design_line_required": true,
+  "human_review_required": true
 }
