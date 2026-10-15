@@ -2849,56 +2849,50 @@ class ConfigValidation(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("not valid JSON", r.stdout + r.stderr)
 
-    def test_human_review_required_optional_is_accepted(self):
+    def _review_config(self, value):
         h = Harness("**Design:** none\n")
-        bad = dict(PHOTOS_CONFIG)
-        bad["human_review_required"] = "optional"
-        h.config_path.write_text(json.dumps(bad))
-        r = h.run(*full_args(h.body_file), "--no-parent", "--top", "--dry-run")
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        cfg = dict(PHOTOS_CONFIG)
+        cfg["human_review_required"] = value
+        h.config_path.write_text(json.dumps(cfg))
+        return h
 
-    def test_human_review_required_absent_behaves_like_required(self):
+    def test_human_review_required_absent_is_accepted(self):
+        # Covers AE4: a missing key means true. The skill, not the engine,
+        # acts on it; the engine only has to accept it.
         h = Harness("**Design:** none\n")
         assert "human_review_required" not in PHOTOS_CONFIG
         r = h.run(*full_args(h.body_file), "--no-parent", "--top", "--dry-run")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
-    def test_human_review_required_bad_value_refuses_naming_legal_values(self):
-        h = Harness("**Design:** none\n")
-        bad = dict(PHOTOS_CONFIG)
-        bad["human_review_required"] = "sometimes"
-        h.config_path.write_text(json.dumps(bad))
+    def test_human_review_required_booleans_are_accepted(self):
+        for value in (True, False):
+            with self.subTest(value=value):
+                h = self._review_config(value)
+                r = h.run(*full_args(h.body_file), "--no-parent", "--top", "--dry-run")
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_human_review_required_old_tier_refuses_naming_legal_values(self):
+        # Covers AE5. No migration message for the old string tiers.
+        h = self._review_config("agent")
         r = h.run(*full_args(h.body_file), "--no-parent", "--top")
         self.assertNotEqual(r.returncode, 0)
         out = r.stdout + r.stderr
         self.assertIn("human_review_required", out)
-        self.assertIn("sometimes", out)
-        self.assertIn("required", out)
-        self.assertIn("optional", out)
         self.assertIn("agent", out)
+        self.assertIn("true or false", out)
         self.assertFalse(h.called("issue", "create", "--title"))
 
-    def test_human_review_required_wrong_case_refuses(self):
-        h = Harness("**Design:** none\n")
-        bad = dict(PHOTOS_CONFIG)
-        bad["human_review_required"] = "REQUIRED"
-        h.config_path.write_text(json.dumps(bad))
-        r = h.run(*full_args(h.body_file), "--no-parent", "--top")
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("human_review_required", r.stdout + r.stderr)
-
-    def test_human_review_required_json_false_refuses_rather_than_defaulting(self):
-        # A config author modeling this field on design_line_required (a real
-        # boolean) might write `false`. jq's `//` treats JSON false the same
-        # as absent, which would silently default to "required" instead of
-        # refusing -- masking the mistake. Explicit false must be refused.
-        h = Harness("**Design:** none\n")
-        bad = dict(PHOTOS_CONFIG)
-        bad["human_review_required"] = False
-        h.config_path.write_text(json.dumps(bad))
-        r = h.run(*full_args(h.body_file), "--no-parent", "--top")
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("human_review_required", r.stdout + r.stderr)
+    def test_human_review_required_non_boolean_values_refuse(self):
+        # The string "true" is the one a value check (rather than a type
+        # check) would let through; null is the one jq's `//` would read as
+        # absent.
+        for value in ("true", "false", "required", "optional", None, 1, 0, [], {}):
+            with self.subTest(value=value):
+                h = self._review_config(value)
+                r = h.run(*full_args(h.body_file), "--no-parent", "--top")
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn("human_review_required", r.stdout + r.stderr)
+                self.assertFalse(h.called("issue", "create", "--title"))
 
 
 class PluckdConfig(unittest.TestCase):

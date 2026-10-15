@@ -299,7 +299,12 @@ PROJECT_NUMBER="$(jq -r '.project_number // empty' "$CONFIG")"
 PROJECT_ID="$(jq -r '.project_id // empty' "$CONFIG")"
 PLAN_DIR="$(jq -r '.plan_dir // empty' "$CONFIG")"
 DESIGN_LINE_REQUIRED="$(jq -r 'if (.design_line_required // false) then "true" else "false" end' "$CONFIG")"
-HUMAN_REVIEW_REQUIRED="$(jq -r 'if has("human_review_required") then (.human_review_required | tostring) else "required" end' "$CONFIG")"
+# human_review_required is a JSON boolean, missing meaning true. The engine
+# only validates it; the skill reads it to decide whether a human previews
+# first. Check the TYPE: jq's `//` treats false as absent, and a string "true"
+# would pass a value check.
+HUMAN_REVIEW_TYPE="$(jq -r 'if has("human_review_required") then (.human_review_required | type) else "boolean" end' "$CONFIG")"
+HUMAN_REVIEW_VALUE="$(jq -c '.human_review_required' "$CONFIG")"
 
 [ -n "$REPO" ] || die "ERROR: config $CONFIG is missing required field: repo"
 case "$REPO" in
@@ -316,11 +321,8 @@ esac
 if [ "$DESIGN_LINE_REQUIRED" = "true" ] && [ -z "$PLAN_DIR" ]; then
   die "ERROR: config $CONFIG sets design_line_required=true but has no plan_dir set."
 fi
-case "$HUMAN_REVIEW_REQUIRED" in
-  required|optional|agent) ;;
-  *) die "ERROR: config $CONFIG's human_review_required must be one of: required,
-       optional, agent (got: $HUMAN_REVIEW_REQUIRED)." ;;
-esac
+[ "$HUMAN_REVIEW_TYPE" = "boolean" ] || die "ERROR: config $CONFIG's human_review_required must be true or false
+       (got: $HUMAN_REVIEW_VALUE)."
 
 SHAPE_COUNT="$(jq -r '(.shapes // []) | length' "$CONFIG")"
 [ "$SHAPE_COUNT" -gt 0 ] || die "ERROR: config $CONFIG defines zero shapes. At least one
