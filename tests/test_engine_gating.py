@@ -114,33 +114,49 @@ sys.stdout.write("{}")
 '''
 
 
-def board_page(rows, has_next=False, cursor="C1"):
-    """One page of the shape scripts/board.sh reads."""
-    nodes = []
+# The Status field's numeric id in the fake's fields listing. board.sh asks
+# for the field by this id, because the REST items endpoint's `fields`
+# parameter takes ids, not names (`fields=Status` is an HTTP 400).
+STATUS_FIELD_ID = 77001
+FIELDS_WITH_STATUS = [
+    {"id": 77000, "name": "Title", "data_type": "title"},
+    {"id": STATUS_FIELD_ID, "name": "Status", "data_type": "single_select"},
+]
+
+
+def board_page(rows, next_cursor=None, status="Backlog"):
+    """One page as `gh api -i users/{owner}/projectsV2/{n}/items` prints it.
+
+    The status line, the response headers, a blank line, then the REST item
+    array. A page with more after it carries a `Link` header whose
+    `rel="next"` URL holds the `after` cursor -- listed AFTER a `rel="prev"`
+    entry, so a parser that takes the first URL in the header reads the
+    wrong one. Header lines end in CRLF, as real gh prints them.
+    """
+    items = []
     for num, title in rows:
-        nodes.append(
+        items.append(
             {
-                "fieldValueByName": {"name": "Backlog"},
-                "content": {
-                    "number": num,
-                    "title": title,
-                    "state": "OPEN",
-                    "blockedBy": {"nodes": []},
-                },
+                "id": 900000 + num,
+                "node_id": "PVTI_%d" % num,
+                "content_type": "Issue",
+                "content": {"number": num, "title": title, "state": "open"},
+                "fields": [
+                    {
+                        "id": STATUS_FIELD_ID,
+                        "name": "Status",
+                        "data_type": "single_select",
+                        "value": {"name": {"raw": status, "html": status}},
+                    }
+                ],
             }
         )
-    return {
-        "data": {
-            "user": {
-                "projectV2": {
-                    "items": {
-                        "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
-                        "nodes": nodes,
-                    }
-                }
-            }
-        }
-    }
+    head = "HTTP/2.0 200 OK\nContent-Type: application/json; charset=utf-8\r\n"
+    if next_cursor is not None:
+        base = "https://api.github.com/user/1/projectsV2/2/items?per_page=100"
+        head += ('Link: <%s&before=PREV>; rel="prev", <%s&after=%s>; rel="next"\r\n'
+                 % (base, base, next_cursor))
+    return head + "\r\n" + json.dumps(items)
 
 
 DEFAULT_BOARD = [
@@ -157,131 +173,21 @@ DEFAULT_BOARD = [
 
 GH_VERSION_LINE = "gh version 2.98.0 (2026-08-20)\n"
 
-# The three flags U1's write path uses, as `gh issue create --help` prints them.
-CREATE_FLAG_LINES = (
-    "      --parent number        Add this issue to a parent issue\n"
-    "      --blocked-by numbers   Mark this issue as blocked by other issues\n"
-    "      --blocking numbers     Mark this issue as blocking other issues\n"
-)
+def probe_rules(version_line=GH_VERSION_LINE):
+    """The fake's answer to `gh --version`, the only thing the probe asks.
 
-
-def create_help(flag_lines=CREATE_FLAG_LINES):
-    """`gh issue create --help`, shaped like the real one.
-
-    The EXAMPLES section names all three flags on purpose. The real help does
-    too -- `--parent` appears three times in it -- which is why the probe has
-    to anchor to the FLAGS block. A probe that grepped the whole text would
-    pass on a `gh` that has none of the flags.
+    This belongs in the BASE table, not in `create_responses()`: most gate
+    tests build a `Harness` with no response table at all.
     """
-    return (
-        "Create an issue on GitHub.\n"
-        "\n"
-        "USAGE\n"
-        "  gh issue create [flags]\n"
-        "\n"
-        "FLAGS\n"
-        "  -a, --assignee login   Assign people by their login\n"
-        "  -b, --body string      Supply a body\n"
-        + flag_lines
-        + "  -w, --web              Open the browser to create an issue\n"
-        "\n"
-        "INHERITED FLAGS\n"
-        "      --repo [HOST/]OWNER/REPO   Select another repository\n"
-        "\n"
-        "EXAMPLES\n"
-        "  $ gh issue create --parent 123 --blocked-by 4 --blocking 5\n"
-    )
-
-
-# The six flags U2's adopt write path uses, as `gh issue edit --help` prints them.
-EDIT_FLAG_LINES = (
-    "      --parent number              Add this issue to a parent issue\n"
-    "      --remove-parent              Remove the parent of this issue\n"
-    "      --add-blocked-by numbers     Mark this issue as blocked by other issues\n"
-    "      --remove-blocked-by numbers  Remove blocked-by relationships\n"
-    "      --add-blocking numbers       Mark this issue as blocking other issues\n"
-    "      --remove-blocking numbers    Remove blocking relationships\n"
-)
-
-
-def edit_help(flag_lines=EDIT_FLAG_LINES):
-    """`gh issue edit --help`, shaped like the real one.
-
-    Adopt mode swaps this sub-command into the probe's needed-flags table, so
-    a `gh` whose `issue edit` lacks the relationship flags must refuse an adopt
-    exactly as a `gh` whose `issue create` lacks them refuses a create.
-    """
-    return (
-        "Edit an issue on GitHub.\n"
-        "\n"
-        "USAGE\n"
-        "  gh issue edit {<numbers> | <urls>} [flags]\n"
-        "\n"
-        "FLAGS\n"
-        "      --add-label names      Add labels by name\n"
-        "  -b, --body string          Set the new body\n"
-        + flag_lines
-        + "  -t, --title string     Set the new title\n"
-        "\n"
-        "INHERITED FLAGS\n"
-        "      --repo [HOST/]OWNER/REPO   Select another repository\n"
-        "\n"
-        "EXAMPLES\n"
-        "  $ gh issue edit 23 --parent 1 --add-blocked-by 4 --add-blocking 5\n"
-    )
-
-
-# The field list bare `gh issue view --json` prints -- to STDERR, exiting 1.
-JSON_FIELDS = (
-    "assignees", "author", "blockedBy", "blocking", "body", "closed",
-    "number", "parent", "state", "title", "url",
-)
-
-
-def json_field_list(fields=JSON_FIELDS):
-    return (
-        "Specify one or more comma-separated fields for `--json`:\n"
-        + "".join("  %s\n" % f for f in fields)
-    )
-
-
-def probe_rules(version_line=GH_VERSION_LINE, help_text=None, help_exit=0,
-                fields=JSON_FIELDS, fields_text=None, fields_exit=1,
-                flag_lines=None, edit_flag_lines=None, edit_help_text=None,
-                edit_help_exit=0):
-    """The fake's answers to the capability probe.
-
-    These belong in the BASE table, not in `create_responses()`: most gate
-    tests build a `Harness` with no response table at all, and a probe rule
-    that only existed in the create table would leave them falling through to
-    the fake's `{}` default -- so every one of them would get the probe refusal
-    instead of the refusal it asserts.
-    """
-    if help_text is None:
-        help_text = create_help(
-            CREATE_FLAG_LINES if flag_lines is None else flag_lines)
-    if edit_help_text is None:
-        edit_help_text = edit_help(
-            EDIT_FLAG_LINES if edit_flag_lines is None else edit_flag_lines)
-    if fields_text is None:
-        fields_text = json_field_list(fields) if fields else ""
-    return [
-        {"match": "--version", "stdout": version_line},
-        {"match": "issue create --help", "stdout": help_text, "exit": help_exit},
-        # Adopt mode probes `gh issue edit` instead of `gh issue create`.
-        {"match": "issue edit --help", "stdout": edit_help_text,
-         "exit": edit_help_exit},
-        # Bare `gh issue view --json` writes to stderr and exits 1. That
-        # non-zero exit is normal and must not read as "undeterminable".
-        {"match": "issue view --json", "stderr": fields_text, "exit": fields_exit},
-    ]
+    return [{"match": "--version", "stdout": version_line}]
 
 
 class Harness:
     """A temp dir holding a body file, a fake `gh`, and its response table."""
 
     def __init__(self, body, boards=None, responses=None, probe=None,
-                 board_exits=None, config=None):
+                 board_exits=None, config=None, board_stdouts=None,
+                 fields=None):
         self.dir = Path(tempfile.mkdtemp(prefix="file_issue_test_"))
         self.body_file = self.dir / "body.md"
         self.body_file.write_text(body)
@@ -296,13 +202,22 @@ class Harness:
         self.calls_log = self.dir / "calls.log"
         self.calls_log.write_text("")
         boards = [DEFAULT_BOARD] if boards is None else boards
-        pages = [json.dumps(board_page(b)) for b in boards]
+        # One single-page board per board READ, in order. `board_stdouts`
+        # replaces that with raw page replies, one per board-page CALL, which
+        # is how a test hands back a board that spans several pages.
+        pages = ([board_page(b) for b in boards] if board_stdouts is None
+                 else list(board_stdouts))
         titles = json.dumps([{"number": n, "title": t} for n, t in boards[0]])
-        board_rule = {"match": "items(first: 100", "stdouts": pages}
+        project = self.config["project_number"]
+        board_rule = {"match": "projectsV2/%s/items?per_page=" % project,
+                      "stdouts": pages}
         if board_exits is not None:
             board_rule["exits"] = list(board_exits)
         table = [
             board_rule,
+            {"match": "projectsV2/%s/fields" % project,
+             "stdout": json.dumps(FIELDS_WITH_STATUS if fields is None
+                                  else fields)},
             {"match": "issue list", "stdout": titles},
         ]
         table.extend(probe_rules() if probe is None else probe)
@@ -360,31 +275,16 @@ class Harness:
         ]
 
     def called(self, *needles):
-        """True when one NON-PROBE call carries every needle.
-
-        `--help` calls are skipped. The capability probe runs
-        `gh issue create --help`, which otherwise satisfies
-        `called("issue", "create")` and would make five "no create happened"
-        assertions pass on a probe call instead of a create.
-        """
+        """True when one call carries every needle."""
         for call in self.calls():
             joined = " ".join(call)
-            if "--help" in call:
-                continue
             if all(n in joined for n in needles):
                 return True
         return False
 
     def network_calls(self):
-        """Every call that is not part of the offline capability probe."""
-        out = []
-        for call in self.calls():
-            if "--help" in call or call == ["--version"]:
-                continue
-            if call[:3] == ["issue", "view", "--json"]:
-                continue
-            out.append(call)
-        return out
+        """Every call except the probe's offline `gh --version`."""
+        return [call for call in self.calls() if call != ["--version"]]
 
 
 def full_args(body_file, **over):
@@ -915,14 +815,10 @@ def path_without_gh():
 
 class CapabilityProbe(unittest.TestCase):
     """
-    `gh` 2.94.0 replaced the node-id lookups this script used to hand-roll with
-    native flags. The script now uses those flags, so it must establish they
-    exist BEFORE it writes anything -- discovering an absent flag mid-write is
-    what leaves a half-wired issue behind.
-
-    The probe resolves to four states, never a boolean: not installed, absent,
-    undeterminable, present. A probe that could not run is not a probe that
-    passed.
+    #14 KTD7: every GitHub call now goes through `gh api`, so the probe no
+    longer reads `gh issue create/edit --help` or `gh issue view --json` for
+    flags and fields the engine does not use. It refuses only when `gh` is not
+    on PATH, and prints the installed version for the record.
     """
 
     ARGS_TAIL = ("--no-parent", "--top", "--dry-run")
@@ -932,48 +828,15 @@ class CapabilityProbe(unittest.TestCase):
         r = h.run(*full_args(h.body_file), *self.ARGS_TAIL, path=path)
         return h, r, r.stdout + r.stderr
 
-    def test_help_missing_the_flags_refuses_before_any_network_call(self):
-        h, r, out = self._run(probe_rules(flag_lines=""))
-        self.assertNotEqual(r.returncode, 0, out)
-        self.assertIn("MISSING CAPABILITY", out)
-        for flag in ("--parent", "--blocked-by", "--blocking"):
-            self.assertIn(flag, out, "must name which flag is missing")
-        self.assertIn("2.98.0", out, "must report the installed version")
-        self.assertIn("brew upgrade gh", out, "must name the upgrade action")
-        self.assertEqual([], h.network_calls(),
-                         "the refusal must land before any network call")
-
-    def test_help_with_all_the_flags_proceeds(self):
+    def test_a_fake_with_no_flag_probe_answers_proceeds(self):
+        # The fake answers only `--version`; a `--help` or bare
+        # `issue view --json` call would get `{}` back and refuse.
         h, r, out = self._run(probe_rules())
         self.assertEqual(r.returncode, 0, out)
-        self.assertNotIn("MISSING CAPABILITY", out)
-        self.assertNotIn("UNDETERMINABLE CAPABILITY", out)
-        self.assertIn("2.98.0", r.stdout)
-
-    def test_help_unreadable_refuses_as_undeterminable(self):
-        h, r, out = self._run(probe_rules(help_text="", help_exit=1))
-        self.assertNotEqual(r.returncode, 0, out)
-        self.assertIn("UNDETERMINABLE CAPABILITY", out)
-        self.assertIn("gh issue create --help", out,
-                      "must print the invocation whose output could not be read")
-        self.assertIn("2.98.0", out, "must print the version or its sentinel")
-        self.assertIn("gh issue create --help", out)
-        self.assertEqual([], h.network_calls())
-
-    def test_undeterminable_wording_is_distinct_from_absent_wording(self):
-        _, _, absent = self._run(probe_rules(flag_lines=""))
-        _, _, undet = self._run(probe_rules(help_text="", help_exit=1))
-        self.assertIn("MISSING CAPABILITY", absent)
-        self.assertNotIn("UNDETERMINABLE CAPABILITY", absent)
-        self.assertIn("UNDETERMINABLE CAPABILITY", undet)
-        self.assertNotIn("MISSING CAPABILITY", undet)
-
-    def test_examples_naming_the_flags_do_not_satisfy_the_probe(self):
-        # The real `gh issue create --help` names `--parent` three times, twice
-        # outside the FLAGS block. Anchoring is what makes this refuse.
-        h, r, out = self._run(probe_rules(flag_lines=""))
-        self.assertNotEqual(r.returncode, 0, out)
-        self.assertIn("MISSING CAPABILITY", out)
+        self.assertIn("2.98.0", r.stdout, "the version is still printed")
+        for call in h.calls():
+            self.assertNotIn("--help", call, call)
+            self.assertNotEqual(["issue", "view", "--json"], call[:3], call)
 
     def test_unparseable_version_still_proceeds_and_prints_the_sentinel(self):
         h, r, out = self._run(probe_rules(version_line="gh, but which one?\n"))
@@ -981,32 +844,11 @@ class CapabilityProbe(unittest.TestCase):
         self.assertIn("unknown", r.stdout,
                       "the sentinel prints where the version would go")
 
-    def test_missing_json_field_refuses_with_the_absent_wording(self):
-        fields = tuple(f for f in JSON_FIELDS if f != "blockedBy")
-        h, r, out = self._run(probe_rules(fields=fields))
-        self.assertNotEqual(r.returncode, 0, out)
-        self.assertIn("MISSING CAPABILITY", out)
-        self.assertIn("blockedBy", out)
-        self.assertEqual([], h.network_calls())
-
-    def test_unreadable_json_field_list_is_undeterminable(self):
-        h, r, out = self._run(probe_rules(fields_text="", fields_exit=1))
-        self.assertNotEqual(r.returncode, 0, out)
-        self.assertIn("UNDETERMINABLE CAPABILITY", out)
-        self.assertIn("gh issue view --json", out)
-
-    def test_a_nonzero_exit_from_the_field_list_is_not_undeterminable(self):
-        # Bare `gh issue view --json` exits 1 on a healthy gh. Reading that as
-        # a failure would refuse every run.
-        h, r, out = self._run(probe_rules(fields_exit=1))
-        self.assertEqual(r.returncode, 0, out)
-
     def test_gh_absent_from_path_refuses_saying_so(self):
         h, r, out = self._run(probe_rules(), path=path_without_gh())
         self.assertNotEqual(r.returncode, 0, out)
         self.assertIn("REFUSED: gh is not on PATH", out)
-        self.assertNotIn("MISSING CAPABILITY", out)
-        self.assertNotIn("UNDETERMINABLE CAPABILITY", out)
+        self.assertEqual([], h.calls())
 
 
 class NativeWritePath(unittest.TestCase):
@@ -1017,8 +859,6 @@ class NativeWritePath(unittest.TestCase):
 
     def _create_argv(self, h):
         for call in h.calls():
-            if "--help" in call:
-                continue
             if call[:2] == ["issue", "create"]:
                 return call
         return None
@@ -1114,8 +954,7 @@ class NativeWritePath(unittest.TestCase):
         )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         views = [c for c in h.calls()
-                 if c[:2] == ["issue", "view"] and "--help" not in c
-                 and c[2:3] != ["--json"]]
+                 if c[:2] == ["issue", "view"]]
         self.assertEqual(1, len(views), views)
         self.assertIn("--json", views[0])
         self.assertIn("parent,blockedBy,blocking", views[0])
@@ -1217,8 +1056,6 @@ def adopt_args(num=ADOPT_NUM, **over):
 def edit_argv(h):
     """The one real `gh issue edit` argv, or None."""
     for call in h.calls():
-        if "--help" in call:
-            continue
         if call[:2] == ["issue", "edit"]:
             return call
     return None
@@ -1226,8 +1063,6 @@ def edit_argv(h):
 
 def create_argv(h):
     for call in h.calls():
-        if "--help" in call:
-            continue
         if call[:2] == ["issue", "create"]:
             return call
     return None
@@ -1236,8 +1071,6 @@ def create_argv(h):
 def wrote_nothing(h):
     """True when no call in this run changed anything on the server."""
     for call in h.calls():
-        if "--help" in call:
-            continue
         joined = " ".join(call)
         if call[:2] in (["issue", "edit"], ["issue", "create"]):
             return False
@@ -1343,21 +1176,6 @@ class AdoptGate(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("--file-anyway", r.stdout + r.stderr)
         self.assertTrue(wrote_nothing(h))
-
-    def test_a_gh_whose_issue_edit_lacks_the_flags_refuses_the_adopt(self):
-        h = Harness("**Design:** none\n",
-                    boards=[ADOPT_PRE_BOARD, ADOPT_POST_BOARD],
-                    responses=adopt_responses(),
-                    probe=probe_rules(edit_flag_lines=""))
-        r = h.run(*adopt_args(), "--no-parent", "--top", "--dry-run")
-        self.assertNotEqual(r.returncode, 0)
-        out = r.stdout + r.stderr
-        self.assertIn("MISSING CAPABILITY", out)
-        for flag in ("--parent", "--add-blocked-by", "--add-blocking",
-                     "--remove-parent", "--remove-blocked-by",
-                     "--remove-blocking"):
-            self.assertIn(flag, out)
-        self.assertEqual([], h.network_calls())
 
 
 class AdoptContradiction(unittest.TestCase):
@@ -1983,7 +1801,7 @@ class ReadBackRetry(unittest.TestCase):
 
     @staticmethod
     def _board_reads(h):
-        return [c for c in h.calls() if any("items(first: 100" in a for a in c)]
+        return [c for c in h.calls() if any("/items?per_page=" in a for a in c)]
 
     def test_listing_catches_up_on_the_second_read(self):
         """The defect itself: absent on the first read, there on the second."""
@@ -2438,44 +2256,6 @@ class DuplicateNumbersInAnAnswer(unittest.TestCase):
         self.assertIn("blocks             ok (63)", r.stdout)
 
 
-class ProbeTerminator(unittest.TestCase):
-    """F6: the probe passed a FLAGLESS gh when the FLAGS terminator moved."""
-
-    def test_a_renamed_terminator_does_not_let_examples_satisfy_the_probe(self):
-        """Closing the block on one hardcoded literal failed UNSAFE.
-
-        With `INHERITED FLAGS` renamed to `GLOBAL FLAGS` the block ran to end
-        of file and swallowed EXAMPLES -- which on real gh 2.98.0 names
-        `--parent`, `--blocked-by` and `--blocking`. A gh with none of the
-        flags in its FLAGS block then probed "ok" and was rejected mid-write,
-        leaving behind the exact half-wired issue the probe exists to prevent.
-
-        `test_examples_naming_the_flags_do_not_satisfy_the_probe` keeps the
-        terminator, so it cannot see this.
-        """
-        flagless = create_help("").replace("INHERITED FLAGS", "GLOBAL FLAGS")
-        self.assertIn("EXAMPLES", flagless)
-        self.assertIn("--parent", flagless.split("EXAMPLES", 1)[1],
-                      "the EXAMPLES must still name the flags, or this test "
-                      "would pass for the wrong reason")
-        h = Harness("**Design:** none\n", probe=probe_rules(help_text=flagless))
-        r = h.run(*full_args(h.body_file), "--no-parent", "--top", "--dry-run")
-        out = r.stdout + r.stderr
-        self.assertNotEqual(r.returncode, 0, out)
-        self.assertIn("MISSING CAPABILITY", out)
-        self.assertEqual([], h.network_calls())
-
-    def test_a_lost_opener_still_fails_safe_as_undeterminable(self):
-        """The other direction, pinned so a future edit cannot swap them."""
-        no_flags_header = create_help().replace("\nFLAGS\n", "\nOPTIONS\n")
-        h = Harness("**Design:** none\n",
-                    probe=probe_rules(help_text=no_flags_header))
-        r = h.run(*full_args(h.body_file), "--no-parent", "--top", "--dry-run")
-        out = r.stdout + r.stderr
-        self.assertNotEqual(r.returncode, 0, out)
-        self.assertIn("UNDETERMINABLE CAPABILITY", out)
-
-
 class ErroredLookupIsNotAnAbsentItem(unittest.TestCase):
     """F8: a FAILED `--after` lookup was reported as proven-wrong."""
 
@@ -2552,35 +2332,6 @@ class RetryCeilingIsEnforced(unittest.TestCase):
                   env={"FILE_ISSUE_READBACK_ATTEMPTS": 2,
                        "FILE_ISSUE_READBACK_DELAY": 30})
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-
-
-class VersionGapArithmetic(unittest.TestCase):
-    """F10: the gap subtracted MINOR versions only."""
-
-    def test_a_future_major_version_is_not_reported_as_behind(self):
-        """gh 3.1 was reported as 97 releases BEHIND 2.98 -- a wrong number
-        stated as confidently as a right one, in the sentence whose whole job
-        is making the refusal clearable."""
-        h = Harness("**Design:** none\n",
-                    probe=probe_rules(version_line="gh version 3.1.0 (2027-01-01)\n",
-                                      flag_lines=""))
-        r = h.run(*full_args(h.body_file), "--no-parent", "--top", "--dry-run")
-        out = r.stdout + r.stderr
-        self.assertNotEqual(r.returncode, 0, out)
-        self.assertIn("installed gh 3.1.0", out)
-        self.assertNotIn("97 release", out)
-        self.assertNotIn("93 release", out)
-        self.assertIn("major version ahead", out)
-
-    def test_an_older_version_on_the_same_major_still_counts_releases(self):
-        h = Harness("**Design:** none\n",
-                    probe=probe_rules(version_line="gh version 2.90.0 (2026-06-01)\n",
-                                      flag_lines=""))
-        r = h.run(*full_args(h.body_file), "--no-parent", "--top", "--dry-run")
-        out = r.stdout + r.stderr
-        self.assertNotEqual(r.returncode, 0, out)
-        self.assertIn("8 release(s) behind 2.98.0", out)
-        self.assertIn("4 release(s) behind 2.94.0", out)
 
 
 class AbsentRefusalWording(unittest.TestCase):
@@ -3052,7 +2803,7 @@ class BoardShIntegration(unittest.TestCase):
     """R2/KTD3: board.sh reads the same --config file file_issue.sh reads,
     and its self-check line ('pages=N rows=N distinct=N') is unchanged --
     still written to stderr, still in that shape -- once the underlying
-    GraphQL query is config-driven instead of hardcoding the login and
+    board read is config-driven instead of hardcoding the login and
     project number."""
 
     def _env(self, h):
@@ -3097,6 +2848,157 @@ class BoardShIntegration(unittest.TestCase):
         )
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("owner", r.stderr)
+
+
+class BoardOverRest(unittest.TestCase):
+    """#14 U1: board.sh reads the board through the REST items endpoint,
+    following the `Link` header's `after` cursor itself, so the page count,
+    the 20-page cap and the rows-versus-distinct self-check all survive the
+    move off GraphQL."""
+
+    PAGE1 = [(101, "First thing on the board"), (102, "Second thing"),
+             (103, "Third thing")]
+    PAGE2 = [(104, "Fourth thing"), (105, "Fifth thing"),
+             (106, "Sixth thing")]
+
+    def _board_calls(self, h):
+        return [c for c in h.calls() if any("/items?per_page=" in a for a in c)]
+
+    def _board_sh(self, h):
+        out_path = h.dir / "board_out.json"
+        env = dict(os.environ)
+        env["PATH"] = f"{h.bin}:{env['PATH']}"
+        env["FAKE_GH_DIR"] = str(h.dir)
+        r = subprocess.run(
+            ["bash", str(BOARD_SH), "--config", str(h.config_path), str(out_path)],
+            capture_output=True, text=True, env=env, check=False,
+        )
+        return r, out_path
+
+    def test_a_two_page_board_is_read_in_order(self):
+        h = Harness("**Design:** none\n",
+                    boards=[self.PAGE1 + self.PAGE2],
+                    board_stdouts=[board_page(self.PAGE1, next_cursor="CUR2"),
+                                   board_page(self.PAGE2)])
+        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "103",
+                  "--dry-run")
+        out = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 0, out)
+        # --after 103 sits on the seam: its neighbours above come from page 1
+        # and its neighbours below from page 2, in board order.
+        seen = [out.index("#%d " % n) for n, _ in self.PAGE1 + self.PAGE2]
+        self.assertEqual(sorted(seen), seen, out)
+        self.assertLess(out.index("#103 "), out.index("NEW ISSUE HERE"))
+        self.assertLess(out.index("NEW ISSUE HERE"), out.index("#104 "))
+        calls = self._board_calls(h)
+        self.assertEqual(2, len(calls), calls)
+        self.assertNotIn("after=", " ".join(calls[0]))
+        self.assertIn("after=CUR2", " ".join(calls[1]),
+                      "the second page must be asked for by the next cursor")
+        self.assertIn("-i", calls[0], "the Link header is only seen with -i")
+
+    def test_board_sh_counts_both_pages(self):
+        h = Harness("**Design:** none\n",
+                    board_stdouts=[board_page(self.PAGE1, next_cursor="CUR2"),
+                                   board_page(self.PAGE2)])
+        r, _ = self._board_sh(h)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("pages=2 rows=6 distinct=6", r.stderr)
+
+    def test_repeated_pages_are_a_truncated_board(self):
+        # The cursor did not advance: the same page came back twice.
+        h = Harness("**Design:** none\n",
+                    board_stdouts=[board_page(self.PAGE1, next_cursor="CUR2"),
+                                   board_page(self.PAGE1)])
+        r = h.run(*full_args(h.body_file), "--no-parent", "--top", "--dry-run")
+        out = r.stdout + r.stderr
+        self.assertNotEqual(r.returncode, 0, out)
+        self.assertIn("TRUNCATED BOARD", out)
+        self.assertIn("not trustworthy", out)
+
+    def test_a_failed_page_read_fails_the_run(self):
+        h = Harness("**Design:** none\n",
+                    board_stdouts=[board_page(self.PAGE1, next_cursor="CUR2"),
+                                   board_page(self.PAGE2)],
+                    board_exits=[0, 1])
+        r = h.run(*full_args(h.body_file), "--no-parent", "--top", "--dry-run")
+        out = r.stdout + r.stderr
+        self.assertNotEqual(r.returncode, 0, out)
+        self.assertIn("QUERY FAILED on page 2", out)
+        self.assertIn("not trustworthy", out)
+
+    def test_a_page_that_is_not_an_item_array_fails_the_run(self):
+        # An empty or object-shaped body would otherwise count as zero rows,
+        # and a truncated board reads exactly like a short one.
+        h = Harness("**Design:** none\n",
+                    board_stdouts=["HTTP/2.0 200 OK\n\r\n"
+                                   + json.dumps({"message": "Not an array"})])
+        r = h.run(*full_args(h.body_file), "--no-parent", "--top", "--dry-run")
+        out = r.stdout + r.stderr
+        self.assertNotEqual(r.returncode, 0, out)
+        self.assertIn("QUERY FAILED on page 1", out)
+        self.assertIn("not trustworthy", out)
+
+    def test_a_next_link_without_a_cursor_fails_the_run(self):
+        # Ending the loop there would read a long board as a short one.
+        page = board_page(self.PAGE1, next_cursor="X").replace(
+            "&after=X", "&cursor=X")
+        h = Harness("**Design:** none\n", board_stdouts=[page])
+        r = h.run(*full_args(h.body_file), "--no-parent", "--top", "--dry-run")
+        out = r.stdout + r.stderr
+        self.assertNotEqual(r.returncode, 0, out)
+        self.assertIn("carries no cursor", out)
+
+    def test_a_pull_request_on_the_board_is_not_a_row(self):
+        # The GraphQL listing read a pull request as numberless and dropped
+        # it; the REST listing numbers it, so the row filter is by type.
+        page = json.loads(board_page(self.PAGE1).split("\r\n\r\n", 1)[1])
+        page.append({"id": 1, "node_id": "PVTI_pr", "content_type": "PullRequest",
+                     "content": {"number": 150, "title": "A pull request"},
+                     "fields": []})
+        h = Harness("**Design:** none\n", boards=[self.PAGE1],
+                    board_stdouts=["HTTP/2.0 200 OK\n\r\n" + json.dumps(page)])
+        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "103",
+                  "--dry-run")
+        out = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 0, out)
+        self.assertIn("#103 ", out)
+        self.assertNotIn("#150", out)
+
+    def test_the_page_cap_still_fires(self):
+        # Every page claims a next page; the cap is what stops the loop.
+        h = Harness("**Design:** none\n",
+                    board_stdouts=[board_page(self.PAGE1, next_cursor="SAME")])
+        r = h.run(*full_args(h.body_file), "--no-parent", "--top", "--dry-run")
+        out = r.stdout + r.stderr
+        self.assertNotEqual(r.returncode, 0, out)
+        self.assertIn("PAGE CAP HIT", out)
+        self.assertEqual(20, len(self._board_calls(h)))
+
+    def test_status_is_requested_by_its_numeric_field_id(self):
+        h = Harness("**Design:** none\n")
+        r, out_path = self._board_sh(h)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        calls = self._board_calls(h)
+        self.assertTrue(calls)
+        for call in calls:
+            self.assertIn("fields=%d" % STATUS_FIELD_ID, " ".join(call))
+        items = [i for page in out_path.read_text().split("\n") if page.strip()
+                 for i in json.loads(page)]
+        self.assertEqual(len(DEFAULT_BOARD), len(items))
+        for item in items:
+            status = [f for f in item["fields"] if f["name"] == "Status"]
+            self.assertEqual("Backlog", status[0]["value"]["name"]["raw"])
+
+    def test_a_project_without_a_status_field_omits_the_fields_parameter(self):
+        h = Harness("**Design:** none\n",
+                    fields=[{"id": 77000, "name": "Title", "data_type": "title"}])
+        r, _ = self._board_sh(h)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        calls = self._board_calls(h)
+        self.assertTrue(calls)
+        for call in calls:
+            self.assertNotIn("fields=", " ".join(call))
 
 
 if __name__ == "__main__":

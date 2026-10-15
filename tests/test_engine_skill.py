@@ -139,9 +139,10 @@ class FlagsMatchTheScript(unittest.TestCase):
     def test_the_gh_remedy_flags_are_only_allowed_because_the_script_prints_them(self):
         """Printed as a remedy, not merely spelled somewhere in the file.
 
-        All three flags also appear in the capability probe's required-flag
-        string, so asserting mere presence stayed green even with every remedy
-        print site deleted -- the test was named for a thing it did not check.
+        All three flags also appeared in the old capability probe's
+        required-flag string, so asserting mere presence stayed green even with
+        every remedy print site deleted -- the test was named for a thing it
+        did not check.
         """
         script_text = read_or_raise(FILE_ISSUE, "remedy-flag check")
         for flag in GH_REMEDY_FLAGS:

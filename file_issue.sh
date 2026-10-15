@@ -484,40 +484,17 @@ parenting_rule() {
 [ "$MODE" = create ] && parenting_rule "$BODY_FILE"
 
 # ---------------------------------------------------------------------------
-# The capability probe. gh 2.94.0 replaced the node-id lookups this script used
-# to hand-roll with native relationship flags, and this script now uses them.
-# A flag discovered absent MID-WRITE leaves a half-wired issue behind, so the
-# capability is established here, offline, before anything touches the network.
+# The capability probe. Issue #14 moves every GitHub call this script makes to
+# `gh api` REST paths, leaving the board-position write as its one GraphQL
+# call, and `gh api` long predates anything here relies on. So the probe asks
+# one thing: is gh on PATH. It used to read `gh issue create/edit --help` and
+# `gh issue view --json` for native relationship flags and fields, which the
+# REST paths do not use.
 #
-# It resolves to four states, never a boolean:
-#   not installed  — gh is not on PATH
-#   absent         — a flag or a --json field this write path needs is missing
-#   undeterminable — the help output could not be read or parsed at all
-#   present        — proceed
-# A probe that could not run is not a probe that passed. Unable to look is not
-# permission.
-#
-# The version is READ and REPORTED — it is what makes the refusal clearable —
-# but it never decides. A gh whose flags probe cleanly and whose version string
-# is unreadable proceeds, with a sentinel printed where the version would go.
+# The version is READ and PRINTED for the record, and never decides. An
+# unreadable version string prints the sentinel `unknown` and the run
+# proceeds.
 # ---------------------------------------------------------------------------
-
-GH_FLAGS_LANDED_IN="2.94.0"      # corroborated against the cli/cli releases API
-GH_NEWEST_VERIFIED_HERE="2.98.0" # the newest release checked by hand in this repo
-
-# The capabilities the write path of THIS RUN uses. One row per gh sub-command.
-# Adopt mode swaps in its own row: the create path never runs `gh issue edit`
-# and adopt never runs `gh issue create`, and refusing either over a flag it
-# does not use would be a refusal with no cause.
-GH_NEEDED_FLAGS=(
-  "issue create|--parent,--blocked-by,--blocking"
-)
-if [ "$MODE" = adopt ]; then
-  GH_NEEDED_FLAGS=(
-    "issue edit|--parent,--add-blocked-by,--add-blocking,--remove-parent,--remove-blocked-by,--remove-blocking"
-  )
-fi
-GH_NEEDED_JSON_FIELDS="parent blockedBy blocking"
 
 gh_version_fact() {
   # The installed version, or the sentinel `unknown`. Never a refusal.
@@ -535,151 +512,14 @@ gh_version_fact() {
   esac
 }
 
-gh_version_major() { local x="$1"; printf '%s' "${x%%.*}"; }
-gh_version_minor() { local x="$1"; x="${x#*.}"; printf '%s' "${x%%.*}"; }
-
-gh_gap_phrase() {
-  # How far $1 sits from the reference version $2, in words. The comparison is
-  # on (major, minor) TOGETHER. Subtracting minors alone reported a future
-  # gh 3.1 as 97 releases BEHIND 2.98 — a wrong number stated with the same
-  # confidence as a right one, in the sentence that exists to make the refusal
-  # clearable. Across a major bump no release COUNT is meaningful, so none is
-  # invented; the direction is stated and the reference named.
-  local v="$1" ref="$2" what="$3"
-  local vma vmi rma rmi
-  vma="$(gh_version_major "$v")";   vmi="$(gh_version_minor "$v")"
-  rma="$(gh_version_major "$ref")"; rmi="$(gh_version_minor "$ref")"
-  if [ "$vma" -eq "$rma" ]; then
-    if [ "$vmi" -lt "$rmi" ]; then
-      printf '%s release(s) behind %s, %s' "$(( rmi - vmi ))" "$ref" "$what"
-    else
-      printf 'at or ahead of %s, %s' "$ref" "$what"
-    fi
-  elif [ "$vma" -lt "$rma" ]; then
-    printf 'a whole major version behind %s, %s' "$ref" "$what"
-  else
-    printf 'a whole major version ahead of %s, %s' "$ref" "$what"
-  fi
-}
-
-gh_version_with_gap() {
-  # A version recorded without its gap is what let a session read
-  # `gh version 2.90.0` and draw no conclusion from it.
-  local v="$1" major minor
-  if [ "$v" = "unknown" ]; then
-    printf 'installed gh version: unknown (its version string could not be parsed)'
-    return 0
-  fi
-  major="$(gh_version_major "$v")"
-  minor="$(gh_version_minor "$v")"
-  case "$major" in ''|*[!0-9]*) printf 'installed gh %s' "$v"; return 0 ;; esac
-  case "$minor" in ''|*[!0-9]*) printf 'installed gh %s' "$v"; return 0 ;; esac
-  printf 'installed gh %s' "$v"
-  printf ' — %s' \
-    "$(gh_gap_phrase "$v" "$GH_NEWEST_VERIFIED_HERE" 'the newest verified in this repo')"
-  printf ', and %s' \
-    "$(gh_gap_phrase "$v" "$GH_FLAGS_LANDED_IN" 'where these flags landed')"
-}
-
-gh_flags_block() {
-  # The FLAGS block only. Every flag also appears in EXAMPLES — `--parent`
-  # appears three times in `gh issue create --help` — so grepping the whole
-  # text would pass on a gh that has none of them.
-  #
-  # The block closes on ANY section header, never on one hardcoded literal.
-  # Losing the OPENER fails safe: no block is read, the probe calls it
-  # undeterminable and refuses. Losing or RENAMING the CLOSER used to fail
-  # UNSAFE — with `INHERITED FLAGS` renamed to `GLOBAL FLAGS` the block ran to
-  # end of file and swallowed EXAMPLES, so a gh with NONE of the flags probed
-  # "ok" and was rejected mid-write, leaving behind exactly the half-wired
-  # issue this probe exists to prevent. gh section headers are upper-case
-  # words at column zero, so that is what ends the block.
-  awk '/^FLAGS$/ {inblock=1; next} /^[A-Z][A-Z ]*$/ {inblock=0} inblock'
-}
-
 probe_gh_capability() {
   command -v gh >/dev/null 2>&1 || die "REFUSED: gh is not on PATH.
-       This script writes every issue relationship through gh's native flags,
-       and reads every one of them back through gh. $NOTHING
+       This script writes every issue relationship through gh, and reads
+       every one of them back through gh. $NOTHING
        Install it (brew install gh), then re-run this command."
 
   GH_VERSION="$(gh_version_fact)"
-
-  local missing="" undeterminable=""
-  local row cmd flags flag help block
-
-  for row in "${GH_NEEDED_FLAGS[@]}"; do
-    cmd="${row%%|*}"
-    flags="${row#*|}"
-    # shellcheck disable=SC2086
-    help="$(gh $cmd --help 2>/dev/null)"
-    block="$(printf '%s\n' "$help" | gh_flags_block)"
-    if [ -z "$(printf '%s' "$block" | tr -d '[:space:]')" ]; then
-      undeterminable="${undeterminable}         gh $cmd --help   (no FLAGS block could be read from its output)
-"
-      continue
-    fi
-    for flag in $(printf '%s' "$flags" | tr ',' ' '); do
-      printf '%s\n' "$block" | grep -qE -- "(^|[^-[:alnum:]])$flag([^-[:alnum:]]|\$)" \
-        || missing="${missing}         $flag   (a flag of: gh $cmd)
-"
-    done
-  done
-
-  # Bare `gh issue view --json` prints its field list to STDERR and exits 1.
-  # That non-zero exit is NORMAL. Reading it as undeterminable would refuse
-  # every run; capture with 2>&1 and judge the output, not the exit code.
-  local fieldout fieldlist field
-  fieldout="$(gh issue view --json 2>&1)"
-  fieldlist="$(printf '%s\n' "$fieldout" | awk '/^  [A-Za-z][A-Za-z0-9]*$/ {print $1}')"
-  if [ -z "$fieldlist" ]; then
-    undeterminable="${undeterminable}         gh issue view --json   (no --json field list could be read from its output)
-"
-  else
-    for field in $GH_NEEDED_JSON_FIELDS; do
-      printf '%s\n' "$fieldlist" | grep -qx -- "$field" \
-        || missing="${missing}         $field   (a --json field of: gh issue view)
-"
-    done
-  fi
-
-  if [ -n "$undeterminable" ]; then
-    die "REFUSED — UNDETERMINABLE CAPABILITY: this gh's support for native issue
-       relationships could not be established. $NOTHING
-
-       Unable to look is not permission, so this refuses rather than assuming.
-
-       These invocations produced output that could not be read or parsed:
-
-$undeterminable
-       $(gh_version_with_gap "$GH_VERSION")
-
-       To clear this, run that invocation yourself and see what it prints:
-
-         gh issue create --help
-         gh issue edit --help
-         gh issue view --json
-         gh --version
-
-       If gh needs re-authenticating or reinstalling, 'gh auth status' and
-       'brew upgrade gh' are the two things to try, then re-run this command."
-  fi
-
-  if [ -n "$missing" ]; then
-    die "REFUSED — MISSING CAPABILITY: this gh cannot write and read issue
-       relationships natively. $NOTHING
-
-       Missing:
-
-$missing
-       $(gh_version_with_gap "$GH_VERSION")
-
-       Upgrade it and re-run this command:
-
-         brew upgrade gh"
-  fi
-
-  echo "gh capability     ok (gh $GH_VERSION; native --parent/--blocked-by/--blocking, and --json parent,blockedBy,blocking)"
+  echo "gh capability     ok (gh $GH_VERSION)"
 }
 
 probe_gh_capability
@@ -692,8 +532,31 @@ probe_gh_capability
 
 BOARD_JSON="$(mktemp -t file_issue_board.XXXXXX)"
 BOARD_ERR="$(mktemp -t file_issue_boarderr.XXXXXX)"
-cleanup() { rm -f "$BOARD_JSON" "$BOARD_ERR" "${BOARD_JSON}.2" "${TITLES_JSON:-}" "${ADOPT_BODY:-}" ; }
+GH_API_ERR="$(mktemp -t file_issue_ghapierr.XXXXXX)"
+cleanup() { rm -f "$BOARD_JSON" "$BOARD_ERR" "$GH_API_ERR" "${BOARD_JSON}.2" "${TITLES_JSON:-}" "${ADOPT_BODY:-}" ; }
 trap cleanup EXIT
+
+# REST helpers. gh_api runs `gh api` with its arguments, passes stdout through
+# and keeps stderr in $GH_API_ERR, so a caller can tell WHY a call failed:
+# gh_api_failed_with reads gh's own "(HTTP NNN)" suffix from it, and a failure
+# that does not carry that status is never read as it. gh's message is no
+# longer on the terminal, so a caller that reports the failure prints it.
+gh_api() { gh api "$@" 2>"$GH_API_ERR"; }
+gh_api_failed_with() { grep -qF "(HTTP $1)" "$GH_API_ERR"; }
+
+issue_numeric_id() {
+  # $1 an issue number. Prints the issue's numeric REST `id` -- what the
+  # sub-issue, dependency and project-item endpoints take, never the number.
+  # Returns 0 found, 2 the issue does not exist (HTTP 404), 1 could not read:
+  # any other failure, or a reply with no numeric id. Unable to look is not
+  # "does not exist"; only a 404 says that.
+  local reply id
+  reply="$(gh_api "repos/$REPO/issues/$1")" || { gh_api_failed_with 404 && return 2; return 1; }
+  id="$(printf '%s\n' "$reply" \
+    | jq -r 'if (.id | type) == "number" and .number != null then .id else empty end' 2>/dev/null)"
+  [ -n "$id" ] || return 1
+  printf '%s\n' "$id"
+}
 
 # The comparison form of an answer set: sorted, DE-DUPLICATED, comma-joined.
 # The -u matches parse_list's, because the read-back compares this against what
@@ -804,17 +667,19 @@ fi
 # ---------------------------------------------------------------------------
 
 read_board() {
-  # Ordered "<number>\t<title>" lines. A truncated board is fatal, because a
-  # truncated board is exactly what hid #164.
+  # Ordered "<number>\t<title>\t<item node id>" lines. A truncated board is
+  # fatal, because a truncated board is exactly what hid #164. Only issues are
+  # rows: the GraphQL listing this replaced read pull requests and drafts as
+  # numberless, and the REST one gives a pull request a number.
   local out="$1"
   if ! bash "$SCRIPT_DIR/board.sh" --config "$CONFIG" "$out" 2>"$BOARD_ERR"; then
     printf 'ERROR: the board listing is not trustworthy — %s\n' "$(tr '\n' ' ' <"$BOARD_ERR")" >&2
     printf 'A truncated board reads exactly like a short one. Refusing to go on.\n' >&2
     return 1
   fi
-  jq -s -r '[.[].data.user.projectV2.items.nodes[]]
-            | .[] | select(.content.number != null)
-            | "\(.content.number)\t\(.content.title)"' "$out"
+  jq -s -r '[.[][]]
+            | .[] | select(.content_type == "Issue" and .content.number != null)
+            | "\(.content.number)\t\(.content.title)\t\(.node_id)"' "$out"
 }
 
 BOARD_ROWS="$(read_board "$BOARD_JSON")" || exit 1
