@@ -311,7 +311,6 @@ DESIGN_LINE_REQUIRED="$(jq -r 'if (.design_line_required // false) then "true" e
 # first. Check the TYPE: jq's `//` treats false as absent, and a string "true"
 # would pass a value check.
 HUMAN_REVIEW_TYPE="$(jq -r 'if has("human_review_required") then (.human_review_required | type) else "boolean" end' "$CONFIG")"
-HUMAN_REVIEW_VALUE="$(jq -c '.human_review_required' "$CONFIG")"
 
 [ -n "$REPO" ] || die "ERROR: config $CONFIG is missing required field: repo"
 case "$REPO" in
@@ -329,7 +328,7 @@ if [ "$DESIGN_LINE_REQUIRED" = "true" ] && [ -z "$PLAN_DIR" ]; then
   die "ERROR: config $CONFIG sets design_line_required=true but has no plan_dir set."
 fi
 [ "$HUMAN_REVIEW_TYPE" = "boolean" ] || die "ERROR: config $CONFIG's human_review_required must be true or false
-       (got: $HUMAN_REVIEW_VALUE)."
+       (got: $(jq -c '.human_review_required' "$CONFIG"))."
 
 SHAPE_COUNT="$(jq -r '(.shapes // []) | length' "$CONFIG")"
 [ "$SHAPE_COUNT" -gt 0 ] || die "ERROR: config $CONFIG defines zero shapes. At least one
@@ -848,7 +847,10 @@ if [ "$MODE" = create ]; then
   TITLES_JSON="$(mktemp -t file_issue_titles.XXXXXX)"
   gh issue list --repo "$REPO" --state open --limit 500 --json number,title >"$TITLES_JSON" 2>/dev/null \
     || die "ERROR: could not list open issues to check for duplicates. Nothing was created."
-  DUPES="$(python3 "$SCRIPT_DIR/issue_text.py" dupes "$TITLE" "$TITLES_JSON")"
+  # Fail closed. DUPES is the only thing standing between a create run and
+  # its write, so a checker that crashed must not read as "none found".
+  DUPES="$(python3 "$SCRIPT_DIR/issue_text.py" dupes "$TITLE" "$TITLES_JSON")" \
+    || die "ERROR: the duplicate check failed, so this cannot say there are no duplicates. $NOTHING"
   if [ -n "$DUPES" ]; then
     echo "########################################################################"
     echo "## POSSIBLE DUPLICATES — read these before anything is filed          #"
@@ -928,9 +930,9 @@ fi
 # truncated board, adopt's refusals, the read-back, the move record -- never
 # depended on the prompt and still runs.
 if [ "$MODE" = create ] && [ -n "$DUPES" ] && [ "$FILE_ANYWAY" -eq 0 ]; then
-  echo "STOPPED: possible duplicates listed above. $NOTHING" >&2
-  echo "       If none of them is the same work, re-run the same command with" >&2
-  echo "       --file-anyway." >&2
+  printf '%s\n' "STOPPED: possible duplicates listed above. $NOTHING
+       If none of them is the same work, re-run the same command with
+       --file-anyway." >&2
   exit 3
 fi
 

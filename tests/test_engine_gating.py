@@ -696,6 +696,21 @@ class NoPromptOneRun(unittest.TestCase):
         self.assertIn("READ-BACK", r.stdout)
         self.assertTrue(h.called("issue", "create", "--title"))
 
+    def test_a_failed_duplicate_check_stops_rather_than_reading_as_none(self):
+        # With no prompt, DUPES is the stop's only input. A listing the
+        # checker cannot parse must not come out as "none found" and file.
+        h = self._harness()
+        table = json.loads((h.dir / "responses.json").read_text())
+        for rule in table:
+            if rule.get("match") == "issue list":
+                rule["stdout"] = "not json"
+        (h.dir / "responses.json").write_text(json.dumps(table))
+        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("duplicate check failed", r.stderr)
+        self.assertNotIn("POSSIBLE DUPLICATES: none found", r.stdout)
+        self.assertFalse(h.called("issue", "create", "--title"))
+
     def test_dry_run_with_possible_duplicates_exits_0_and_writes_nothing(self):
         h = self._harness(DUPE_PRE_BOARD, DUPE_POST_BOARD)
         r = h.run(*full_args(h.body_file, **{"--title": DUPE_TITLE}),
