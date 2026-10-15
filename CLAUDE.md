@@ -51,17 +51,17 @@ issue #1. Until it ships, file directly:
 bash file_issue.sh --config config.json \
     --title "..." --body-file body.md --shape work \
     (--parent N | --no-parent) (--after N | --top) \
-    (--blocked-by N,N | --blocked-by none) (--blocks N,N | --blocks none) \
-    --dry-run   # always preview first
+    (--blocked-by N,N | --blocked-by none) (--blocks N,N | --blocks none)
 ```
 
-The script no longer asks for a yes: run without `--dry-run` and it writes.
-This repo's `config.json` leaves `human_review_required` unset, so review is
-on. Show Joe the `--dry-run` output verbatim and wait for his yes before
-re-running without `--dry-run`. If the real run exits 3, it found possible
-duplicates and wrote nothing; add `--file-anyway` only once Joe has ruled
-them out. Once #1 ships, the installed skill becomes the front door
-instead of the bare command above.
+This repo's `config.json` sets `human_review_required: false`, so file in one
+run without waiting for Joe. Quote the read-back lines back to him. If the
+run exits 3, it found possible duplicates and wrote nothing: if one is
+clearly the same work, add the new details to it with `gh issue comment`;
+if you're unsure, file nothing, tell Joe the matches, and carry on; if none
+is the same work, re-run with `--file-anyway`. Add `--dry-run` when you want
+to see the board neighborhood first. Once #1 ships, the installed skill
+becomes the front door instead of the bare command above.
 
 ## Learnings go in `docs/solutions/` — nowhere else
 
