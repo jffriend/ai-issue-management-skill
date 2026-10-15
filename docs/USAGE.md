@@ -40,7 +40,7 @@ bash file_issue.sh --config config.json --adopt 123 \
     [--dry-run]
 ```
 
-Adopt **refuses rather than reconciles**. If the issue is closed, already sits under a different parent, or already carries a `blocked-by` or `blocks` link this invocation didn't name, the run stops and prints the exact `gh issue edit --remove-*` command that would clear the contradiction. It never silently overwrites a placement decision someone already made.
+Adopt **refuses rather than reconciles**. If the issue is closed, already sits under a different parent, or already carries a `blocked-by` or `blocks` link this invocation didn't name, the run stops and prints the exact `gh api -X DELETE ...` command that would clear the contradiction. It never silently overwrites a placement decision someone already made.
 
 Board position is the one exception. All four answers are mandatory, so adopt always names a position and moves the issue there — but the preview shows the slot the issue holds today next to the slot it's headed for, so the cost of the move is visible in the run's output. Once the move is verified, a comment on the issue records the slot it came from and the slot it went to, so the move stays recoverable afterward.
 
@@ -78,6 +78,24 @@ Both modes support it, whatever `human_review_required` is set to. When you pass
 3. A **summary** — what would be written, including (for adopt) the board slot the issue holds today next to the slot it would move to.
 
 Nothing is created and nothing is changed at this point. Run the same command without `--dry-run` once the preview looks right. With `human_review_required` set to `true` (the default), the skill always previews first and waits for a person to approve.
+
+## Filing from a cloud session (`board position NOT SET`)
+
+**Filing works where GitHub's GraphQL API is refused, except for setting the board position.**
+
+Every call the tool makes goes over GitHub's REST API, with one exception: moving an issue to its board position. GitHub has no REST route for that, so it still uses GraphQL. A Claude Code cloud session refuses GraphQL calls.
+
+When the position write is refused (HTTP 403), the run still creates the issue, adds it to the board, writes its parent and blocking links, and reads all of them back. It exits 0. The read-back shows:
+
+```
+  board position     NOT SET (GitHub refused the position write; see the notice below)
+```
+
+The issue sits wherever the board put it, usually at the bottom. A `BOARD POSITION NOT SET` notice prints an adopt command. Run that command from a local session, where GraphQL works, and it moves the issue to the position you asked for. It re-checks every other relationship and writes nothing that is already there.
+
+No move comment is written when the position is not set, because the issue did not move. The local adopt run that places it records its own move.
+
+Any 403 on the position write is treated this way, including one caused by a token without project access or a rate limit. The notice is loud on purpose.
 
 ## Where the full step-by-step procedure lives
 

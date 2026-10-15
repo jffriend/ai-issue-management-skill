@@ -52,7 +52,7 @@ Each numeric answer is checked offline, before any network call, to confirm it's
 
 ### Adopt Refuses Rather Than Reconciles
 
-If you try to adopt an issue that already has a parent, or a blocked-by or blocks link this run didn't name, the tool stops. It prints the exact `gh issue edit --remove-*` command that would clear the conflict, rather than guessing which value you actually meant and overwriting the other one silently.
+If you try to adopt an issue that already has a parent, or a blocked-by or blocks link this run didn't name, the tool stops. It prints the exact `gh api -X DELETE ...` command that would clear the conflict, rather than guessing which value you actually meant and overwriting the other one silently.
 
 Position is the one exception. Since a position answer is always required, adopt always moves the issue to the position you named — but it shows you the slot the issue holds today next to the slot it's headed for before it writes anything, and it writes a comment afterward recording the move.
 
@@ -78,7 +78,7 @@ Collapsing all three into a single "not found means broken" answer once mislabel
 
 ### Adopt Writes a Delta, Never the Full Desired Set
 
-`gh issue edit` isn't forgiving about relationships you send it twice. Re-adding a link an issue already has doesn't quietly do nothing — it fails the entire call, exactly the same way for every kind of relationship, parent included. Real error text from the GitHub CLI: a repeated blocked-by link fails with "Target issue has already been taken," and a repeated parent link fails with "Issue may not contain duplicate sub-issues."
+GitHub isn't forgiving about relationships you send it twice. Re-adding a link an issue already has doesn't quietly do nothing — it fails the call, the same way for every kind of relationship, parent included. This was first measured through `gh issue edit`, where a repeated blocked-by link failed with "Target issue has already been taken" and a repeated parent link failed with "Issue may not contain duplicate sub-issues." The tool now writes each link with its own REST call. How REST answers a duplicate has not been measured, so the tool keeps sending only what is missing.
 
 Because adopt exists specifically to finish wiring issues that are already partly correct, sending the full desired state every time would fail on exactly the issues adopt is for. So this engine reads the issue's current relationships first and sends only what's genuinely missing. If nothing is missing, it issues no write call at all — and it still reads the state back afterward, because skipping the write isn't the same thing as knowing the state is right.
 
@@ -114,8 +114,12 @@ Three things about this tool's behavior come from your config file rather than b
 
 Every other guard on this page holds identically no matter what your config says. These three are the only places where "it depends on your repo" is a true statement about this tool's behavior.
 
-### A Version Gap in gh Gets Caught Before It Can Leave an Issue Half-Wired
+### Board Position Degrades Instead of Failing
 
-Before any write, the tool checks the installed `gh` binary for the specific flags and `--json` fields the run is about to need — it doesn't assume a flag exists just because an older version of `gh` had it. That check resolves to one of three states: "present," "absent," or "undeterminable."
+Every call this tool makes goes over GitHub's REST API, except one: setting an issue's board position. GitHub has no REST route for that, so it uses GraphQL. Some sessions, including Claude Code cloud sessions, refuse GraphQL calls.
 
-Finding a missing flag mid-write is exactly how an issue ends up half-wired with no clean way to finish the job from where it stopped. Checking first, instead of finding out partway through a write, is what this guard exists to prevent.
+When GitHub refuses the position write with HTTP 403, the tool does not call the issue half-wired. The issue exists, it is on the board, and every other relationship read back matching. Only its position is wrong. So the run exits 0, the read-back says `board position NOT SET`, and a loud notice prints the adopt command that places it from a session where GraphQL works. That command is safe on a correctly wired issue: it writes only what is missing and reads everything back.
+
+No move comment is written in this case, because the issue did not move. The adopt run that places it later records its own move.
+
+The tool does not check up front whether GraphQL is reachable. It reacts to the refusal on the one call that needs it. Any other failure of the position write, one that is not a 403, is still a half-wired refusal. A 403 from a different cause, such as a token without project access or a rate limit, degrades the same way; the notice names the fix either way.

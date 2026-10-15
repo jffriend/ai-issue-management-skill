@@ -79,6 +79,16 @@
 #   where you are sending it, and the move is recorded as a comment on the
 #   issue once the read-back proves it landed.
 #
+#   WHERE GRAPHQL IS REFUSED (a Claude Code cloud session, for one). Every
+#   call goes over GitHub's REST API except the board-position write, which
+#   has no REST route. When GitHub refuses that write with HTTP 403, the run
+#   still files and wires the issue, reads every relationship back, and exits
+#   0. The read-back says the board position is NOT SET, the issue sits wherever
+#   the board put it (usually the bottom), and a notice prints the adopt
+#   command that places it from a session where GraphQL works. No move
+#   comment is written in that case, because nothing moved; the adopt run
+#   that places it later records its own move.
+#
 #   There is no confirmation prompt; a run without --dry-run writes. The one
 #   exception is a create run that finds possible duplicates: it prints them
 #   and stops with exit code 3, having created nothing. Re-run with
