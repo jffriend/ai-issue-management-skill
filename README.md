@@ -38,7 +38,7 @@ repo as a git submodule.
   walks through adding the submodule, writing your config, and filling in
   the skill template.
 - **Ready to file or adopt an issue?** `docs/USAGE.md` covers create mode,
-  adopt mode, the four placement answers, and what `--dry-run` shows you
-  before anything is confirmed.
+  adopt mode, the four placement answers, what `--dry-run` shows you, and
+  what happens when a filing looks like a duplicate.
 - **Want to know why the tool works the way it does?** `docs/CONCEPTS.md`
   defines its vocabulary and explains the reasoning behind every guard.

@@ -120,8 +120,8 @@ Ask the caller now, as questions, rather than discovering a refusal later.
 leaving a flag off is not an answer.**
 
 Each question has its own way of saying "nothing" — **the literal word `none`
-is only an answer to the last two.** Getting this wrong costs a wasted preview
-cycle, because the engine digit-validates the first two and refuses.
+is only an answer to the last two.** Getting this wrong costs a wasted run,
+because the engine digit-validates the first two and refuses.
 
 1. **Parent** — which plan does this belong to? Either the plan-parent issue
    number, or an explicit *no parent*. The word `none` is **not** accepted

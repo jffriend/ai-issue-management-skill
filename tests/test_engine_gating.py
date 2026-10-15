@@ -2909,7 +2909,8 @@ class ConfigValidation(unittest.TestCase):
         # Covers AE4: a missing key means true. The skill, not the engine,
         # acts on it; the engine only has to accept it.
         h = Harness("**Design:** none\n")
-        assert "human_review_required" not in PHOTOS_CONFIG
+        cfg = {k: v for k, v in PHOTOS_CONFIG.items() if k != "human_review_required"}
+        h.config_path.write_text(json.dumps(cfg))
         r = h.run(*full_args(h.body_file), "--no-parent", "--top", "--dry-run")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 

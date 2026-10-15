@@ -54,7 +54,7 @@ Each numeric answer is checked offline, before any network call, to confirm it's
 
 If you try to adopt an issue that already has a parent, or a blocked-by or blocks link this run didn't name, the tool stops. It prints the exact `gh issue edit --remove-*` command that would clear the conflict, rather than guessing which value you actually meant and overwriting the other one silently.
 
-Position is the one exception. Since a position answer is always required, adopt always moves the issue to the position you named — but it shows you the slot the issue holds today next to the slot it's headed for, before you confirm anything, and it writes a comment afterward recording the move.
+Position is the one exception. Since a position answer is always required, adopt always moves the issue to the position you named — but it shows you the slot the issue holds today next to the slot it's headed for before it writes anything, and it writes a comment afterward recording the move.
 
 A real example of that comment, from this tool's own history: "Moved from position 7 (following #257) to position 9 (following #256)." Naming what each side follows matters, because a bare number stops meaning anything once the board shifts around it.
 
@@ -90,15 +90,15 @@ Before showing you a board neighborhood or a duplicate-title check, the tool con
 
 This exists because a silently truncated listing once hid an existing issue well enough that a duplicate of it got filed anyway. Refusing to proceed on an unproven listing is what makes that specific mistake structurally harder to repeat.
 
-### Nothing Writes Without a Preview Shown First — Who Confirms Is Configurable
+### A Possible Duplicate Stops the Write — Whether a Human Previews First Is Configurable
 
-Running with `--dry-run` stops the tool right after it shows you the board neighborhood and any duplicate-title matches — nothing gets created or changed. That preview is the only thing that lets a person catch the two calls this tool can compute but can't actually judge: whether something is a duplicate, and whether a position is right.
+The tool can compute two things it can't judge: whether a new issue duplicates an open one, and whether a position is right. It handles them differently.
 
-Who confirms after that preview is a setting — `human_review_required` in your config. `required` (the default) means a human has to say yes to that specific preview before anything is written. `optional` means the agent can confirm on its own, but only when the request that asked for the filing already said so up front; otherwise it behaves like `required`. `agent` means the agent always confirms on its own, once it has shown the preview.
+**Possible duplicates stop a create run before anything is written.** The run prints the matching titles and exits with code 3. Whoever is filing reads them and decides: comment on the existing issue, or re-run with `--file-anyway`. A filing with no matches writes in one run. The tool never asks for confirmation on stdin.
 
-Whichever value applies, the preview still has to be shown to a human **verbatim** first — never summarized, never paraphrased. That word is load-bearing: a summary can quietly drop the one duplicate match or the one out-of-place position that mattered, and the confirmation step exists to catch precisely those two judgment calls.
+**Whether a person sees a preview first is `human_review_required` in your config.** `true` (the default) means the agent runs with `--dry-run`, shows that output to a person **verbatim**, and waits for a yes before the real run. Verbatim matters: a summary can drop the one duplicate match or the one wrong position that mattered. `false` means the agent runs once, judges any possible duplicates itself, and never stops the session over them: if it's unsure, it files nothing and tells you the matches.
 
-**A surprise always wins, at every value.** A possible duplicate the agent can't confidently rule out, a board position that doesn't match what was asked for, an adopt that unexpectedly moves the issue, or the tool refusing outright — any of those stops the automatic path and hands the decision to a human, even under `agent`. The setting only ever controls the routine, no-surprise case; it never authorizes pushing past something unexpected.
+With review off, nothing checks the position before it's written. The read-back reports where the issue landed, and an adopt that moves an issue records the slot it came from in a comment on the issue, so a wrong move can be undone.
 
 ### GitHub's Own "New Issue" Button Skips Every Guard on This Page
 
