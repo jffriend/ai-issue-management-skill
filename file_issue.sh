@@ -845,8 +845,16 @@ if [ "$MODE" = create ]; then
   # The duplicate-title check answers a question that only arises for an issue
   # that does not exist yet, so adopt mode skips it.
   TITLES_JSON="$(mktemp -t file_issue_titles.XXXXXX)"
-  gh issue list --repo "$REPO" --state open --limit 500 --json number,title >"$TITLES_JSON" 2>/dev/null \
+  TITLES_LIMIT=500
+  gh issue list --repo "$REPO" --state open --limit "$TITLES_LIMIT" --json number,title >"$TITLES_JSON" 2>/dev/null \
     || die "ERROR: could not list open issues to check for duplicates. Nothing was created."
+  # A full listing means there may be more open issues than were read, and a
+  # match among those is missed. Say so; checking past the limit is #19.
+  if [ "$(jq length "$TITLES_JSON" 2>/dev/null)" = "$TITLES_LIMIT" ]; then
+    echo "WARNING: the duplicate check read only the first $TITLES_LIMIT open issues."
+    echo "         The repo may have more, and a duplicate among them would be missed."
+    echo
+  fi
   # Fail closed. DUPES is the only thing standing between a create run and
   # its write, so a checker that crashed must not read as "none found".
   DUPES="$(python3 "$SCRIPT_DIR/issue_text.py" dupes "$TITLE" "$TITLES_JSON")" \

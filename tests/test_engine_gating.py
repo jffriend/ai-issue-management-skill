@@ -711,6 +711,34 @@ class NoPromptOneRun(unittest.TestCase):
         self.assertNotIn("POSSIBLE DUPLICATES: none found", r.stdout)
         self.assertFalse(h.called("issue", "create", "--title"))
 
+    def _harness_with_open_issue_count(self, count):
+        h = self._harness()
+        titles = [{"number": 1000 + i, "title": f"Unrelated open issue {i}"}
+                  for i in range(count)]
+        table = json.loads((h.dir / "responses.json").read_text())
+        for rule in table:
+            if rule.get("match") == "issue list":
+                rule["stdout"] = json.dumps(titles)
+        (h.dir / "responses.json").write_text(json.dumps(table))
+        return h
+
+    def test_a_listing_at_the_limit_warns_that_matches_may_be_missed(self):
+        # Issue #17: the check reads at most 500 open issues. A full listing
+        # means there may be more, so the run says so, then files as before.
+        h = self._harness_with_open_issue_count(500)
+        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("WARNING: the duplicate check read only the first 500",
+                      r.stdout)
+        self.assertTrue(h.called("issue", "create", "--title"))
+
+    def test_a_listing_under_the_limit_does_not_warn(self):
+        h = self._harness_with_open_issue_count(499)
+        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("WARNING: the duplicate check", r.stdout)
+        self.assertIn("POSSIBLE DUPLICATES: none found", r.stdout)
+
     def test_dry_run_with_possible_duplicates_exits_0_and_writes_nothing(self):
         h = self._harness(DUPE_PRE_BOARD, DUPE_POST_BOARD)
         r = h.run(*full_args(h.body_file, **{"--title": DUPE_TITLE}),
