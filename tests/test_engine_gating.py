@@ -219,7 +219,7 @@ def issue_reply(n, state="open", body="", parent=None):
 # The issues the tests name as a parent, a blocker or a blocked issue. Create
 # reads each once for its id before writing anything (#14 KTD3). No number
 # here is a prefix of another, because the fake matches on substrings.
-REFERENCED = (55, 63, 70, 77, 122, 133)
+REFERENCED = (55, 63, 70, 77, 122, 133, 240)
 
 
 def referenced_issue_rules():
@@ -240,12 +240,18 @@ def probe_rules(version_line=GH_VERSION_LINE):
     return [{"match": "--version", "stdout": version_line}]
 
 
+GRAPHQL_BLOCKED_RULE = {
+    "match": "graphql", "exit": 1, "stdout": "",
+    "stderr": "gh: Resource not accessible by integration (HTTP 403)\n",
+}
+
+
 class Harness:
     """A temp dir holding a body file, a fake `gh`, and its response table."""
 
     def __init__(self, body, boards=None, responses=None, probe=None,
                  board_exits=None, config=None, board_stdouts=None,
-                 fields=None):
+                 fields=None, graphql_blocked=False):
         self.dir = Path(tempfile.mkdtemp(prefix="file_issue_test_"))
         self.body_file = self.dir / "body.md"
         self.body_file.write_text(body)
@@ -271,7 +277,11 @@ class Harness:
                       "stdouts": pages}
         if board_exits is not None:
             board_rule["exits"] = list(board_exits)
-        table = [
+        # `graphql_blocked` refuses every GraphQL call the way a session
+        # without GraphQL access does (#14 KTD10): exit 1, gh's `(HTTP 403)`
+        # suffix on stderr. It goes FIRST, so no other rule can answer one.
+        table = [GRAPHQL_BLOCKED_RULE] if graphql_blocked else []
+        table += [
             board_rule,
             {"match": "projectsV2/%s/fields" % project,
              "stdout": json.dumps(FIELDS_WITH_STATUS if fields is None
@@ -559,43 +569,73 @@ PRE_BOARD = [
 ]
 
 
+# The REST board-half calls, as the fake matches them. Item-add is `POST
+# users/{owner}/projectsV2/{n}/items -f type=Issue -F id=<issue id>`; its rule
+# must come BEFORE the generic `-X POST` rule, which it also matches. The
+# single-item read the read-back corroborates with is `GET .../items/<id>`,
+# and nothing else carries `/items/`: the listing is `items?per_page=`.
+ITEM_ADD_MATCH = "items -f type=Issue"
+ITEM_READ_MATCH = "/items/"
+# The position write is the one GraphQL call left (#14 KTD2).
+POSITION_MATCH = "updateProjectV2ItemPosition"
+
+
+def item_reply(n, node_id=None):
+    """A REST project item. Every item the fake's board listing carries has
+    numeric id 900000 + its issue number and node id PVTI_<number> (see
+    board_page); item-add answers in the same shape."""
+    return {"id": 900000 + int(n), "node_id": node_id or "PVTI_%d" % int(n),
+            "content_type": "Issue", "content": {"number": int(n)}}
+
+
+def item_read_rule(corroborate):
+    """The read-back's single-item read: the item when `corroborate` is
+    truthy, a 404 otherwise -- the corroborating read agrees it is absent."""
+    if corroborate:
+        return {"match": ITEM_READ_MATCH, "stdout": json.dumps(item_reply(200))}
+    return {"match": ITEM_READ_MATCH, "exit": 1,
+            "stderr": "gh: Not Found (HTTP 404)\n"}
+
+
+# The relationship read-back's three REST reads of #200 (#14 KTD6). The two
+# dependency lists come before the bare issue read, which is a substring of
+# both.
+READ_BLOCKED_MATCH = "issues/200/dependencies/blocked_by?"
+READ_BLOCKING_MATCH = "issues/200/dependencies/blocking?"
+READ_ISSUE_MATCH = "issues/200"
+
+
+def dependency_list(numbers):
+    """`GET .../dependencies/blocked_by` or `/blocking`: an array of issues."""
+    return json.dumps([{"number": int(n), "id": issue_id(n)} for n in numbers])
+
+
 def create_responses(blocked_by, blocking, parent=None, corroborate=""):
     """Canned replies for the create-and-read-back half.
 
     The issue create is `POST repos/{repo}/issues` with its title as the first
-    field, so `issues -f title=` matches it and nothing else. Every other
-    write -- the sub-issue and dependency POSTs -- is answered by the generic
-    `-X POST` rule after it, which must come before the referenced-issue GETs
-    at the end: `issues/55` is a substring of `issues/55/sub_issues`.
+    field, so `issues -f title=` matches it and nothing else. Item-add is
+    answered next, then every other write -- the sub-issue and dependency
+    POSTs -- by the generic `-X POST` rule, which must come before the issue
+    reads at the end: `issues/55` is a substring of `issues/55/sub_issues`.
 
-    The read-back rule keys on `--json parent,blockedBy,blocking`; the
-    relationship read-back stays on `gh issue view` until #14's U6.
+    The read-back is three REST reads of #200: the issue (its parent) and its
+    two dependency lists.
 
-    `corroborate` is the item id the single-issue project-items read returns
-    when the board LISTING does not show the issue. Empty by default -- the
-    corroborating read agrees the issue is not there -- so every existing
-    assertion here is unchanged. Its rule must come BEFORE the generic
-    `projectItems` rule, whose substring the corroborating call also carries.
+    `corroborate` makes the single-item read return the item when the board
+    LISTING does not show the issue. Empty by default -- the corroborating
+    read agrees the issue is not there.
     """
     return [
         {"match": "issues -f title=", "stdout": json.dumps(issue_reply(200))},
+        {"match": ITEM_ADD_MATCH, "stdout": json.dumps(item_reply(200))},
         {"match": "-X POST", "stdout": "{}"},
-        {"match": "item-add", "stdout": json.dumps({"id": "PVTI_new"})},
-        {"match": "boardMembershipCorroboration",
-         "stdout": (corroborate + "\n") if corroborate else ""},
-        {"match": "projectItems", "stdout": "PVTI_after\n"},
-        {"match": "updateProjectV2ItemPosition", "stdout": json.dumps({"data": {}})},
-        {"match": "--json parent,blockedBy,blocking", "stdout": json.dumps({
-            "parent": ({"number": int(parent)} if parent else None),
-            "blockedBy": {
-                "nodes": [{"number": n} for n in blocked_by],
-                "totalCount": len(blocked_by),
-            },
-            "blocking": {
-                "nodes": [{"number": n} for n in blocking],
-                "totalCount": len(blocking),
-            },
-        })},
+        {"match": POSITION_MATCH, "stdout": json.dumps({"data": {}})},
+        item_read_rule(corroborate),
+        {"match": READ_BLOCKED_MATCH, "stdout": dependency_list(blocked_by)},
+        {"match": READ_BLOCKING_MATCH, "stdout": dependency_list(blocking)},
+        {"match": READ_ISSUE_MATCH,
+         "stdout": json.dumps(issue_reply(200, parent=parent))},
         *referenced_issue_rules(),
     ]
 
@@ -658,7 +698,7 @@ class NoPromptOneRun(unittest.TestCase):
         self.assertIn("Nothing was created", r.stderr)
         self.assertIn("--file-anyway", r.stderr)
         self.assertFalse(h.created())
-        self.assertFalse(h.called("item-add"))
+        self.assertFalse(h.called(ITEM_ADD_MATCH))
 
     def test_file_anyway_files_past_possible_duplicates(self):
         h = self._harness(DUPE_PRE_BOARD, DUPE_POST_BOARD)
@@ -872,13 +912,12 @@ class ReadBack(unittest.TestCase):
         # A board with GitHub's auto-add workflow puts the new issue on it
         # before item-add runs, and item-add then refuses with "Content
         # already exists in this project". pluckd #504 and #508 both came back
-        # HALF-WIRED this way. The id must come from the by-number lookup.
-        responses = override(create_responses([], []), "item-add", exit=1,
-                             stderr="GraphQL: Content already exists in this "
-                                    "project (addProjectV2ItemById)\n")
-        at = [r["match"] for r in responses].index("item-add") + 1
-        responses.insert(at, {"match": "boardItemByIssueNumber",
-                              "stdout": "PVTI_auto_added\n"})
+        # HALF-WIRED this way. The id must come from the board listing, re-read
+        # after item-add fails, since the pre-write listing predates the issue
+        # (#14 KTD5).
+        responses = override(create_responses([], []), ITEM_ADD_MATCH, exit=1,
+                             stderr="gh: Content already exists in this "
+                                    "project (HTTP 422)\n")
         h = Harness(
             "**Design:** none\n",
             boards=[PRE_BOARD, [
@@ -894,7 +933,8 @@ class ReadBack(unittest.TestCase):
         positions = [c for c in h.calls()
                      if any("updateProjectV2ItemPosition" in a for a in c)]
         self.assertEqual(1, len(positions), positions)
-        self.assertIn("PVTI_auto_added", " ".join(positions[0]))
+        self.assertIn("i=PVTI_200", positions[0],
+                      "the node id the re-read listing carries for #200")
         self.assertIn("board position     ok (after #101)", r.stdout)
 
     def test_missing_from_the_board_fails_loudly(self):
@@ -1116,12 +1156,10 @@ class RestWritePath(unittest.TestCase):
             self.assertNotEqual(["issue", "create"], call[:2], call)
             self.assertNotEqual(["issue", "list"], call[:2], call)
             if "graphql" in joined:
-                # The board item lookups leave GraphQL in #14's U5; until
-                # then they and the position write are the only calls on it.
-                self.assertTrue("updateProjectV2ItemPosition" in joined
-                                or "projectItems" in joined, call)
+                # The position write is the only call left on GraphQL.
+                self.assertIn(POSITION_MATCH, joined, call)
 
-    def test_the_relationship_read_back_is_one_call(self):
+    def test_the_relationship_read_back_is_three_rest_reads(self):
         board_after = [
             (101, "First thing on the board"),
             (200, "A brand new distinct piece of work"),
@@ -1139,11 +1177,12 @@ class RestWritePath(unittest.TestCase):
             "--blocked-by", "122", "--blocks", "63",
         )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        views = [c for c in h.calls()
-                 if c[:2] == ["issue", "view"]]
-        self.assertEqual(1, len(views), views)
-        self.assertIn("--json", views[0])
-        self.assertIn("parent,blockedBy,blocking", views[0])
+        base = "repos/jffriend/photo-consolidation/issues/200"
+        for path in (base, base + "/dependencies/blocked_by?per_page=100",
+                     base + "/dependencies/blocking?per_page=100"):
+            reads = [c for c in h.calls() if c == ["api", path]]
+            self.assertEqual(1, len(reads), (path, h.calls()))
+        self.assertFalse([c for c in h.calls() if c[:2] == ["issue", "view"]])
 
 
 # ---------------------------------------------------------------------------
@@ -1170,40 +1209,24 @@ ADOPT_POST_BOARD = [
 ]
 
 
-def rel_json(parent=None, blocked_by=(), blocking=()):
-    return {
-        "parent": ({"number": int(parent)} if parent else None),
-        "blockedBy": {"nodes": [{"number": int(n)} for n in blocked_by],
-                      "totalCount": len(blocked_by)},
-        "blocking": {"nodes": [{"number": int(n)} for n in blocking],
-                     "totalCount": len(blocking)},
-    }
-
-
-def dependency_list(numbers):
-    """`GET .../dependencies/blocked_by` or `/blocking`: an array of issues."""
-    return json.dumps([{"number": int(n), "id": issue_id(n)} for n in numbers])
-
-
 def adopt_responses(pre_parent=None, pre_blocked=(), pre_blocking=(),
                     post_parent=None, post_blocked=(), post_blocking=(),
                     state="open", body="**Design:** none\n",
-                    issue_exit=0, issue_stdout=None,
-                    write_exit=0, item_by_number="PVTI_adopt",
+                    issue_stdout=None, write_exit=0,
                     corroborate="", blocked_stdout=None):
     """Canned replies for an adopt run.
 
-    The PRE-FETCH is three REST reads -- the issue and its two dependency
-    lists -- and the READ-BACK is still the one `gh issue view --json
-    parent,blockedBy,blocking` until #14's U6. They must be answerable
-    differently: the pre-fetch has to show no conflicting links or the KD2
-    refusal fires, while the read-back has to show the links just written.
+    The PRE-FETCH and the READ-BACK read the same three REST paths -- the
+    issue and its two dependency lists -- so each rule answers its FIRST call
+    with the pre-write state and every later one with the post-write state.
+    They must differ: the pre-fetch has to show no conflicting links or the
+    KD2 refusal fires, while the read-back has to show the links just written.
 
-    ORDER MATTERS, because the fake matches substrings. The `-X POST` rule
-    comes first, since every write's path also names an issue a read rule
-    matches. The two dependency-list reads come before the bare issue read
-    `issues/200`, which is a substring of both. `item-add` comes before that
-    too: its `--url` carries `issues/200`.
+    ORDER MATTERS, because the fake matches substrings. Item-add comes first,
+    since it also carries `-X POST`; then the `-X POST` rule, since every
+    write's path also names an issue a read rule matches. The two
+    dependency-list reads come before the bare issue read `issues/200`, which
+    is a substring of both.
     """
     if issue_stdout is None:
         issue_stdout = json.dumps(issue_reply(ADOPT_NUM, state=state, body=body,
@@ -1211,27 +1234,19 @@ def adopt_responses(pre_parent=None, pre_blocked=(), pre_blocking=(),
     if blocked_stdout is None:
         blocked_stdout = dependency_list(pre_blocked)
     return [
+        {"match": ITEM_ADD_MATCH,
+         "stdout": json.dumps(item_reply(200, node_id="PVTI_from_item_add"))},
         {"match": "-X POST", "stdout": "{}", "exit": write_exit},
-        {"match": "issues/%s/dependencies/blocked_by?" % ADOPT_NUM,
-         "stdout": blocked_stdout},
-        {"match": "issues/%s/dependencies/blocking?" % ADOPT_NUM,
-         "stdout": dependency_list(pre_blocking)},
-        # The by-issue-number item lookup carries a marker literal in its
-        # GraphQL text. Without it the generic `projectItems` rule below would
-        # hand adopt the `--after` item's id and the test would prove nothing.
-        {"match": "boardItemByIssueNumber",
-         "stdout": (item_by_number + "\n") if item_by_number else ""},
-        # The read-back's corroborating single-issue read. Same store, its own
-        # marker, so it is answerable separately from both lookups above.
-        {"match": "boardMembershipCorroboration",
-         "stdout": (corroborate + "\n") if corroborate else ""},
-        {"match": "projectItems", "stdout": "PVTI_after\n"},
-        {"match": "item-add", "stdout": json.dumps({"id": "PVTI_from_item_add"})},
-        {"match": "updateProjectV2ItemPosition", "stdout": json.dumps({"data": {}})},
-        {"match": "--json parent,blockedBy,blocking",
-         "stdout": json.dumps(rel_json(post_parent, post_blocked, post_blocking))},
-        {"match": "issues/%s" % ADOPT_NUM, "stdout": issue_stdout,
-         "exit": issue_exit},
+        {"match": POSITION_MATCH, "stdout": json.dumps({"data": {}})},
+        item_read_rule(corroborate),
+        {"match": READ_BLOCKED_MATCH,
+         "stdouts": [blocked_stdout, dependency_list(post_blocked)]},
+        {"match": READ_BLOCKING_MATCH,
+         "stdouts": [dependency_list(pre_blocking), dependency_list(post_blocking)]},
+        {"match": READ_ISSUE_MATCH,
+         "stdouts": [issue_stdout,
+                     json.dumps(issue_reply(ADOPT_NUM, state=state, body=body,
+                                            parent=post_parent))]},
         *referenced_issue_rules(),
     ]
 
@@ -1290,7 +1305,7 @@ def wrote_nothing(h):
         if call[:1] == ["api"] and "-X" in call \
                 and call[call.index("-X") + 1] in WRITE_METHODS:
             return False
-        if "item-add" in joined or "updateProjectV2ItemPosition" in joined:
+        if POSITION_MATCH in joined:
             return False
     return True
 
@@ -1641,34 +1656,39 @@ class AdoptReadBack(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("parent", (r.stdout + r.stderr).lower())
 
-    def test_an_issue_already_on_the_board_resolves_its_item_id_by_number(self):
+    def test_an_issue_already_on_the_board_takes_its_item_id_from_the_listing(self):
         # item-add cannot answer this: the create path takes the id from
         # item-add's output and refuses when it is empty, which for an issue
-        # already on the board would abort a correctly wired filing.
+        # already on the board would abort a correctly wired filing. The
+        # pre-write listing carries the item's node id (#14 KTD5).
         h = adopt_harness()
         r = h.run(*adopt_args(), "--no-parent", "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertFalse(h.called("item-add"),
-                         "the id came from the by-number lookup, not item-add")
+        self.assertFalse(h.called(ITEM_ADD_MATCH),
+                         "the id came from the board listing, not item-add")
         positions = [c for c in h.calls()
                      if any("updateProjectV2ItemPosition" in a for a in c)]
         self.assertEqual(1, len(positions), positions)
-        self.assertIn("PVTI_adopt", " ".join(positions[0]))
+        self.assertIn("i=PVTI_200", positions[0])
+        self.assertIn("a=PVTI_101", positions[0])
         self.assertIn("board position     ok (after #101)", r.stdout)
 
-    def test_the_by_number_lookup_falls_back_to_item_add_when_it_finds_nothing(self):
-        # An adopted issue that is not on the board yet: the lookup returns
-        # nothing and item-add puts it there.
+    def test_an_issue_not_on_the_board_is_item_added(self):
+        # An adopted issue that is not on the board yet: the listing has no
+        # row for it, so item-add puts it there.
+        off_board = [(101, "First thing on the board"), (102, "Second thing")]
         top_board = [
             (200, "An existing issue being wired"),
             (101, "First thing on the board"),
             (102, "Second thing"),
         ]
-        h = adopt_harness(boards=[ADOPT_PRE_BOARD, top_board],
-                          item_by_number="")
+        h = adopt_harness(boards=[off_board, top_board])
         r = h.run(*adopt_args(), "--no-parent", "--top")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertTrue(h.called("item-add"))
+        self.assertTrue(h.called(ITEM_ADD_MATCH))
+        positions = [c for c in h.calls()
+                     if any("updateProjectV2ItemPosition" in a for a in c)]
+        self.assertIn("i=PVTI_from_item_add", positions[0])
         self.assertIn("board position     ok (top)", r.stdout)
 
     def test_an_adopt_failure_never_says_a_create_happened(self):
@@ -2342,8 +2362,9 @@ class ReadBackRetry(unittest.TestCase):
 def override(responses, match, **fields):
     """Return `responses` with the rule whose `match` is `match` replaced.
 
-    Keeps the ORDER of the table, which several rules depend on -- the marked
-    GraphQL lookups have to stay ahead of the generic `projectItems` rule.
+    Keeps the ORDER of the table, which several rules depend on -- item-add
+    has to stay ahead of the generic `-X POST` rule, and the dependency-list
+    reads ahead of the bare issue read.
     """
     out = []
     seen = 0
@@ -2367,7 +2388,12 @@ def position_line(stdout):
 
 
 class ReadBackProvesSomething(unittest.TestCase):
-    """F1: the relationship read-back passed on ANY non-empty JSON."""
+    """F1: the relationship read-back passed on ANY non-empty JSON.
+
+    Over REST (#14 KTD6) it reads three replies, and each one's SHAPE is
+    checked, because empty is a legal answer for all three: an issue with no
+    parent, no blockers, blocking nothing.
+    """
 
     BOARD_AFTER = [
         (101, "First thing on the board"),
@@ -2375,7 +2401,30 @@ class ReadBackProvesSomething(unittest.TestCase):
         (102, "Second thing"),
     ]
 
-    def test_a_reply_without_the_three_fields_is_not_a_pass(self):
+    def _run(self, match=None, args=("--no-parent",), parent=None, **fields):
+        responses = create_responses([], [], parent)
+        if match is not None:
+            responses = override(responses, match, **fields)
+        h = Harness("**Design:** none\n", boards=[PRE_BOARD, self.BOARD_AFTER],
+                    responses=responses)
+        r = h.run(*full_args(h.body_file), *args, "--after", "101")
+        return r, r.stdout + r.stderr
+
+    # The read-back line each REST reply proves, keyed by the rule answering it.
+    OK_LINE = {READ_ISSUE_MATCH: "  parent             ok",
+               READ_BLOCKED_MATCH: "  blocked-by         ok",
+               READ_BLOCKING_MATCH: "  blocks             ok"}
+
+    def _assert_could_not_look(self, r, out, match):
+        self.assertNotEqual(r.returncode, 0, out)
+        self.assertNotIn("every relationship read back matching", out)
+        self.assertNotIn(self.OK_LINE[match], out,
+                         "a reply that could not be read proved nothing")
+        self.assertIn("The READ failed, not the write.", out,
+                      "a reply that could not be read is not a failed write")
+        self.assertNotIn("delete", out.replace("Do not delete", ""))
+
+    def test_an_issue_reply_without_number_and_state_is_not_a_pass(self):
         """`{"message":"Not Found"}` used to read back as three clean `ok`s.
 
         Every jq extraction on it yields empty, and empty compares EQUAL to the
@@ -2383,34 +2432,48 @@ class ReadBackProvesSomething(unittest.TestCase):
         `parent ok (none)`, `blocked-by ok (none)`, `blocks ok (none)` and
         exited 0 having proven nothing at all.
         """
-        h = Harness(
-            "**Design:** none\n",
-            boards=[PRE_BOARD, self.BOARD_AFTER],
-            responses=override(create_responses([], []),
-                               "--json parent,blockedBy,blocking",
-                               stdout=json.dumps({"message": "Not Found"})),
-        )
-        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
-        out = r.stdout + r.stderr
-        self.assertNotEqual(r.returncode, 0, out)
+        r, out = self._run(READ_ISSUE_MATCH,
+                           stdout=json.dumps({"message": "Not Found"}))
+        self._assert_could_not_look(r, out, READ_ISSUE_MATCH)
         self.assertIn("unrecognised shape", out)
-        self.assertNotIn("every relationship read back matching", out)
-        self.assertIn("The READ failed, not the write.", out,
-                      "a reply that could not be read is not a failed write")
-        self.assertNotIn("delete", out.replace("Do not delete", ""))
 
-    def test_a_relationship_read_that_exits_non_zero_is_not_a_pass(self):
-        h = Harness(
-            "**Design:** none\n",
-            boards=[PRE_BOARD, self.BOARD_AFTER],
-            responses=override(create_responses([], []),
-                               "--json parent,blockedBy,blocking",
-                               stdout="", exit=1),
-        )
-        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
-        out = r.stdout + r.stderr
-        self.assertNotEqual(r.returncode, 0, out)
-        self.assertIn("The READ failed, not the write.", out)
+    def test_an_issue_read_that_exits_non_zero_is_not_a_pass(self):
+        r, out = self._run(READ_ISSUE_MATCH, stdout="", exit=1,
+                           stderr="gh: Server Error (HTTP 502)\n")
+        self._assert_could_not_look(r, out, READ_ISSUE_MATCH)
+
+    def test_a_dependency_list_that_is_not_an_array_is_not_a_pass(self):
+        # Covers R4. An object there would extract as "no links".
+        for match in (READ_BLOCKED_MATCH, READ_BLOCKING_MATCH):
+            with self.subTest(match=match):
+                r, out = self._run(match,
+                                   stdout=json.dumps({"message": "Not Found"}))
+                self._assert_could_not_look(r, out, match)
+
+    def test_a_dependency_read_that_exits_non_zero_is_not_a_pass(self):
+        r, out = self._run(READ_BLOCKING_MATCH, stdout="", exit=1,
+                           stderr="gh: Server Error (HTTP 502)\n")
+        self._assert_could_not_look(r, out, READ_BLOCKING_MATCH)
+
+    def test_a_malformed_parent_url_is_not_read_as_no_parent(self):
+        reply = issue_reply(200)
+        reply["parent_issue_url"] = "https://api.github.com/repos/x/y/issues/"
+        r, out = self._run(READ_ISSUE_MATCH, stdout=json.dumps(reply))
+        self._assert_could_not_look(r, out, READ_ISSUE_MATCH)
+        self.assertIn("parent", out)
+
+    def test_a_parentless_reply_with_no_parent_key_passes_a_no_parent_filing(self):
+        # GitHub OMITS parent_issue_url on a parentless issue (measured
+        # 2026-10-15), so an absent key is "no parent", not "could not look".
+        self.assertNotIn("parent_issue_url", issue_reply(200), "precondition")
+        r, out = self._run()
+        self.assertEqual(0, r.returncode, out)
+        self.assertIn("parent             ok (none)", r.stdout)
+
+    def test_a_parent_url_naming_the_asked_for_parent_passes(self):
+        r, out = self._run(args=("--parent", "240"), parent="240")
+        self.assertEqual(0, r.returncode, out)
+        self.assertIn("parent             ok (#240)", r.stdout)
 
 
 class NumbersAreValidatedOffline(unittest.TestCase):
@@ -2550,50 +2613,199 @@ class DuplicateNumbersInAnAnswer(unittest.TestCase):
         self.assertIn("blocks             ok (63)", r.stdout)
 
 
-class ErroredLookupIsNotAnAbsentItem(unittest.TestCase):
-    """F8: a FAILED `--after` lookup was reported as proven-wrong."""
+def board_page_without_node_id(rows, n):
+    """`board_page(rows)` with issue #n's item carrying no node id."""
+    head, body = board_page(rows).split("\r\n\r\n", 1)
+    items = json.loads(body)
+    for item in items:
+        if item["content"]["number"] == n:
+            del item["node_id"]
+    return head + "\r\n\r\n" + json.dumps(items)
 
-    def test_an_errored_after_lookup_says_the_READ_failed(self):
-        """`2>/dev/null` made an errored query look exactly like an absent
-        item, and the call site routed that to half_wired() -- the did-not-land
-        refusal, the one that prints "delete #N and re-run" -- over a READ that
-        failed."""
-        board_after = [
-            (101, "First thing on the board"),
-            (200, "A brand new distinct piece of work"),
-            (102, "Second thing"),
-        ]
+
+class ErroredLookupIsNotAnAbsentItem(unittest.TestCase):
+    """F8: a FAILED `--after` lookup was reported as proven-wrong.
+
+    The `--after` item's node id now comes from the pre-write board listing
+    (#14 KTD5), which the gate already proved names #AFTER. So the item can no
+    longer be ABSENT once a write has happened; it can still be UNREADABLE --
+    a row with no node id -- and that must stay a could-not-look.
+    """
+
+    BOARD_AFTER = [
+        (101, "First thing on the board"),
+        (200, "A brand new distinct piece of work"),
+        (102, "Second thing"),
+    ]
+
+    def test_an_after_item_with_no_node_id_says_the_READ_failed(self):
+        """`2>/dev/null` once made an errored query look exactly like an
+        absent item, and the call site routed that to half_wired() -- the
+        did-not-land refusal, the one that prints "delete #N and re-run" --
+        over a READ that failed."""
         h = Harness(
             "**Design:** none\n",
-            boards=[PRE_BOARD, board_after],
-            responses=override(create_responses([], []), "projectItems",
-                               stdout="", stderr="GraphQL: something broke\n",
-                               exit=1),
+            boards=[PRE_BOARD, self.BOARD_AFTER],
+            board_stdouts=[board_page_without_node_id(PRE_BOARD, 101),
+                           board_page(self.BOARD_AFTER)],
+            responses=create_responses([], []),
         )
         r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
         out = r.stdout + r.stderr
-        self.assertNotEqual(r.returncode, 0, out)
+        self.assertEqual(1, r.returncode, out)
+        self.assertIn("the board item for #101 could not be read", out)
         self.assertIn("The READ failed, not the write.", out)
-        self.assertNotIn("could not find the board item", out)
         self.assertNotIn("delete", out.replace("Do not delete", ""))
         self.assertIn("--adopt 200", out, "must name a safe next action")
+        self.assertFalse(h.called(POSITION_MATCH))
 
-    def test_a_genuinely_absent_after_item_still_takes_the_proven_wrong_path(self):
-        board_after = [
-            (101, "First thing on the board"),
-            (200, "A brand new distinct piece of work"),
-            (102, "Second thing"),
-        ]
-        h = Harness(
-            "**Design:** none\n",
-            boards=[PRE_BOARD, board_after],
-            responses=override(create_responses([], []), "projectItems",
-                               stdout="", exit=0),
-        )
-        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
+
+POSITION_403 = {"exit": 1, "stdout": "",
+                "stderr": "gh: Resource not accessible by integration (HTTP 403)\n"}
+
+
+class BoardHalfOverRest(unittest.TestCase):
+    """#14 U5: item-add is a REST POST carrying the issue's numeric id, and the
+    position write -- the one GraphQL call left -- is classified by its error
+    (KTD2): HTTP 403 degrades, anything else is half-wired as before."""
+
+    BOARD_AFTER = [
+        (101, "First thing on the board"),
+        (200, "A brand new distinct piece of work"),
+        (102, "Second thing"),
+    ]
+
+    def _run(self, responses=None, boards=None):
+        h = Harness("**Design:** none\n",
+                    boards=boards or [PRE_BOARD, self.BOARD_AFTER],
+                    responses=responses or create_responses([], []))
+        return h, h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
+
+    def test_item_add_posts_the_issue_id_and_the_position_takes_its_node_id(self):
+        h, r = self._run()
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        adds = [c for c in h.calls() if ITEM_ADD_MATCH in " ".join(c)]
+        self.assertEqual(1, len(adds), adds)
+        self.assertEqual(["api", "-X", "POST", "users/jffriend/projectsV2/2/items",
+                          "-f", "type=Issue", "-F", "id=%d" % issue_id(200)],
+                         adds[0])
+        positions = [c for c in h.calls() if POSITION_MATCH in " ".join(c)]
+        self.assertEqual(1, len(positions), positions)
+        self.assertIn("i=PVTI_200", positions[0])
+        self.assertIn("a=PVTI_101", positions[0],
+                      "the --after item's node id, from the pre-write listing")
+
+    def test_a_refused_position_write_continues_to_the_read_back(self):
+        h, r = self._run(override(create_responses([], []), POSITION_MATCH,
+                                  **POSITION_403))
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertIn("READ-BACK", r.stdout)
+        self.assertIn("board membership   ok", r.stdout)
+        self.assertNotIn("MISMATCH", r.stderr)
+
+    def test_a_position_write_failing_any_other_way_is_half_wired(self):
+        h, r = self._run(override(create_responses([], []), POSITION_MATCH,
+                                  exit=1, stdout="",
+                                  stderr="gh: Bad Gateway (HTTP 502)\n"))
+        err = r.stderr
+        self.assertEqual(1, r.returncode, r.stdout + err)
+        self.assertIn("MISMATCH: the board position write failed for #200", err)
+        self.assertIn("HTTP 502", err, "gh's own reason reaches the operator")
+        self.assertIn("It is left HALF-WIRED", err)
+        self.assertNotIn("READ-BACK", r.stdout)
+        self.assertNotIn("NOT SET", r.stdout + err)
+
+    def test_corroboration_reads_the_item_item_add_returned(self):
+        # The listing never shows #200; the single-item read by item-add's
+        # numeric id is what proves membership.
+        h, r = self._run(create_responses([], [], corroborate=True),
+                         boards=[PRE_BOARD, BOARD_WITHOUT_200])
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        self.assertIn("Membership is PROVEN", r.stderr)
+        self.assertTrue(h.called("api", "users/jffriend/projectsV2/2/items/900200"))
+
+    def test_a_corroborating_item_that_names_another_issue_proves_nothing(self):
+        # A reply that is the wrong item, or not an item at all, must not read
+        # as membership.
+        for reply in (item_reply(201), {"message": "Not Found"}):
+            with self.subTest(reply=reply):
+                responses = override(create_responses([], []), ITEM_READ_MATCH,
+                                     stdout=json.dumps(reply))
+                h, r = self._run(responses, boards=[PRE_BOARD, BOARD_WITHOUT_200])
+                self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+                self.assertIn("not on the board", r.stderr)
+                self.assertNotIn("Membership is PROVEN", r.stderr)
+
+
+class DegradedPosition(unittest.TestCase):
+    """#14 U6 / KTD8: a position write refused with HTTP 403 leaves the item
+    where it landed. Membership is still proven, the position comparison is
+    skipped and reported NOT SET, adopt's move comment is not written, and the
+    run ends 0 with the command a local session runs to place it."""
+
+    BOARD_AFTER = [
+        (101, "First thing on the board"),
+        (102, "Second thing"),
+        (200, "A brand new distinct piece of work"),
+    ]
+
+    def _create(self, boards=None, corroborate=""):
+        responses = override(create_responses([], [], corroborate=corroborate),
+                             POSITION_MATCH, **POSITION_403)
+        h = Harness("**Design:** none\n",
+                    boards=boards or [PRE_BOARD, self.BOARD_AFTER],
+                    responses=responses)
+        return h, h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
+
+    def test_a_degraded_create_proves_membership_and_says_not_set(self):
+        # #200 landed at the bottom, not after #101: no position mismatch.
+        h, r = self._create()
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertIn("board membership   ok", r.stdout)
+        self.assertIn("board position     NOT SET", r.stdout)
+        self.assertNotIn("board position     ok", r.stdout)
+        self.assertNotIn("MISMATCH", r.stderr)
+        self.assertIn("blocks             ok (none)", r.stdout,
+                      "the relationships are still read back")
+        err = r.stderr
+        self.assertIn("HTTP 403", err)
+        self.assertIn("wherever it landed", err)
+        self.assertIn(
+            "  bash %s --config %s --adopt 200 --no-parent --after 101 "
+            "--blocked-by none --blocks none" % (FILE_ISSUE, h.config_path),
+            err.splitlines(), "the exact command a local session runs")
+
+    def test_a_degraded_create_proven_only_by_corroboration_succeeds(self):
+        h, r = self._create(boards=[PRE_BOARD, BOARD_WITHOUT_200],
+                            corroborate=True)
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertIn("board membership   ok", r.stdout)
+        self.assertIn("board position     NOT SET", r.stdout)
+
+    def test_a_degraded_create_that_never_appears_is_still_absent(self):
+        h, r = self._create(boards=[PRE_BOARD, BOARD_WITHOUT_200])
         out = r.stdout + r.stderr
-        self.assertNotEqual(r.returncode, 0, out)
-        self.assertIn("could not find the board item for #101", out)
+        self.assertEqual(1, r.returncode, out)
+        self.assertIn("not on the board", out)
+        self.assertNotIn("NOT SET", r.stdout)
+        self.assertNotIn("delete", out.replace("Do not delete", ""))
+        self.assertEqual(5, len([c for c in h.calls()
+                                 if any("/items?per_page=" in a for a in c)]) - 1,
+                         "the same retry bound is spent before refusing")
+
+    def test_a_degraded_adopt_that_would_have_moved_writes_no_comment(self):
+        # #200 sits third on ADOPT_PRE_BOARD; --after 101 would move it.
+        responses = override(adopt_responses(), POSITION_MATCH, **POSITION_403)
+        h = Harness("**Design:** none\n",
+                    boards=[ADOPT_PRE_BOARD, ADOPT_PRE_BOARD],
+                    responses=responses)
+        r = h.run(*adopt_args(), "--no-parent", "--after", "101")
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertIn("MOVES it", position_line(r.stdout))
+        self.assertIn("board position     NOT SET", r.stdout)
+        self.assertEqual([], comment_calls(h), "nothing moved, so nothing to record")
+        self.assertNotIn("move recorded", r.stdout)
+        self.assertIn("--adopt 200 --no-parent --after 101", r.stderr)
 
 
 class RetryCeilingIsEnforced(unittest.TestCase):
@@ -2699,14 +2911,21 @@ class AdoptDisclosesTheMove(unittest.TestCase):
         self.assertIn("MOVES it", line)
 
 
+COMMENT_MATCH = "issues/200/comments"
+
+
 def comment_calls(h):
-    """Every real `gh issue comment` argv this run made."""
-    return [c for c in h.calls() if c[:2] == ["issue", "comment"]]
+    """Every comment this run posted: `gh api -X POST .../issues/N/comments`."""
+    return [c for c in h.calls()
+            if c[:3] == ["api", "-X", "POST"] and len(c) > 3
+            and c[3].endswith("/comments")]
 
 
 def comment_body(call):
-    """The --body argument of a `gh issue comment` argv."""
-    return call[call.index("--body") + 1]
+    """The `body=` field of a comment POST."""
+    bodies = [a for a in call if a.startswith("body=")]
+    assert len(bodies) == 1, call
+    return bodies[0][len("body="):]
 
 
 class AdoptRecordsTheMove(unittest.TestCase):
@@ -2731,7 +2950,8 @@ class AdoptRecordsTheMove(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         calls = comment_calls(h)
         self.assertEqual(1, len(calls), calls)
-        self.assertIn("200", calls[0])
+        self.assertEqual("repos/jffriend/photo-consolidation/issues/200/comments",
+                         calls[0][3])
         body = comment_body(calls[0])
         self.assertIn("position 3", body)
         self.assertIn("following #102", body)
@@ -2774,8 +2994,7 @@ class AdoptRecordsTheMove(unittest.TestCase):
         # No origin slot exists, so there is nothing to record -- and the run
         # must not trip over the absent one.
         off_board = [(101, "First thing on the board"), (102, "Second thing")]
-        h = adopt_harness(boards=[off_board, ADOPT_POST_BOARD],
-                          item_by_number="")
+        h = adopt_harness(boards=[off_board, ADOPT_POST_BOARD])
         r = h.run(*adopt_args(), "--no-parent", "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual([], comment_calls(h))
@@ -2830,8 +3049,9 @@ class AdoptRecordsTheMove(unittest.TestCase):
         h = Harness(
             "**Design:** none\n",
             boards=[ADOPT_PRE_BOARD, ADOPT_POST_BOARD],
-            responses=[{"match": "issue comment", "stdout": "",
-                        "stderr": "HTTP 502", "exit": 1}] + adopt_responses(),
+            responses=[{"match": COMMENT_MATCH, "stdout": "",
+                        "stderr": "gh: Bad Gateway (HTTP 502)\n", "exit": 1}]
+            + adopt_responses(),
         )
         r = h.run(*adopt_args(), "--no-parent", "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -2885,10 +3105,10 @@ class AdoptRecordsTheMove(unittest.TestCase):
 
 
 class FakeGhRuleOrder(unittest.TestCase):
-    """F14: the two GraphQL markers are distinct and neither shadows the
-    other -- but only because their rules come BEFORE the generic
-    `projectItems` rule. Nothing asserted that, and a reorder would make
-    `test_missing_from_the_board_fails_loudly` unable to fail."""
+    """F14: the fake matches argv SUBSTRINGS, so a specific rule only answers
+    when it comes before every more general rule it overlaps. Nothing used to
+    assert that, and a reorder made `test_missing_from_the_board_fails_loudly`
+    unable to fail."""
 
     @staticmethod
     def _index(rules, match):
@@ -2897,26 +3117,19 @@ class FakeGhRuleOrder(unittest.TestCase):
                 return i
         raise AssertionError("no rule matching %r" % match)
 
-    def test_the_marked_lookups_come_before_the_generic_one(self):
-        create = create_responses([], [])
-        self.assertLess(self._index(create, "boardMembershipCorroboration"),
-                        self._index(create, "projectItems"))
-        adopt = adopt_responses()
-        for marker in ("boardItemByIssueNumber", "boardMembershipCorroboration"):
-            self.assertLess(self._index(adopt, marker),
-                            self._index(adopt, "projectItems"),
-                            "%s must be answerable separately" % marker)
+    def test_item_add_comes_before_the_generic_post(self):
+        # Item-add is a POST too; behind `-X POST` it would answer `{}`.
+        for table in (create_responses([], []), adopt_responses()):
+            self.assertLess(self._index(table, ITEM_ADD_MATCH),
+                            self._index(table, "-X POST"))
 
-    def test_the_adopt_dependency_reads_come_before_the_issue_read(self):
+    def test_the_dependency_reads_come_before_the_issue_read(self):
         """`issues/200` is a substring of both dependency-list paths, so the
         order is what tells them apart."""
-        adopt = adopt_responses()
-        bare = self._index(adopt, "issues/%s" % ADOPT_NUM)
-        for path in ("dependencies/blocked_by?", "dependencies/blocking?"):
-            self.assertLess(
-                self._index(adopt, "issues/%s/%s" % (ADOPT_NUM, path)), bare)
-        self.assertLess(self._index(adopt, "item-add"), bare,
-                        "item-add's --url carries issues/200")
+        for table in (create_responses([], []), adopt_responses()):
+            bare = self._index(table, READ_ISSUE_MATCH)
+            for match in (READ_BLOCKED_MATCH, READ_BLOCKING_MATCH):
+                self.assertLess(self._index(table, match), bare)
 
     def test_no_rule_is_shadowed_by_an_earlier_one(self):
         """A rule whose match CONTAINS an earlier rule's match can never be
@@ -2939,12 +3152,6 @@ class FakeGhRuleOrder(unittest.TestCase):
             for i, rule in enumerate(table):
                 if rule["match"].startswith("issues/"):
                     self.assertLess(post, i, rule["match"])
-
-    def test_the_markers_the_script_emits_are_the_ones_the_fake_matches(self):
-        text = FILE_ISSUE.read_text()
-        for marker in ("boardItemByIssueNumber", "boardMembershipCorroboration"):
-            self.assertIn(marker, text,
-                          "the fake keys on a marker the script no longer emits")
 
 
 # ---------------------------------------------------------------------------
@@ -3316,6 +3523,97 @@ class BoardOverRest(unittest.TestCase):
         self.assertTrue(calls)
         for call in calls:
             self.assertNotIn("fields=", " ".join(call))
+
+
+class GraphQLBlocked(unittest.TestCase):
+    """#14 U7: the main flows with EVERY GraphQL call refused (HTTP 403), as in
+    a session whose proxy blocks GraphQL. Filing, adopting, the dry-run and
+    the duplicate stop all still work; only the board position degrades.
+
+    Every test also asserts the only GraphQL call it made was the position
+    write, so a path that reintroduces any other GraphQL call fails here even
+    where its refusal would otherwise be absorbed.
+    """
+
+    def tearDown(self):
+        for call in self.h.calls():
+            joined = " ".join(call)
+            if "graphql" in joined:
+                self.assertIn(POSITION_MATCH, joined,
+                              "a GraphQL call other than the position write: %r"
+                              % call)
+
+    def _create(self, responses, *args, pre=PRE_BOARD, post=None):
+        post = post or [
+            (101, "First thing on the board"),
+            (102, "Second thing"),
+            (103, "Third thing"),
+            (200, "A brand new distinct piece of work"),
+        ]
+        self.h = Harness("**Design:** none\n", boards=[pre, post],
+                         responses=responses, graphql_blocked=True)
+        return self.h.run("--body-file", str(self.h.body_file),
+                          "--shape", "work", *args)
+
+    def test_create_with_a_parent_and_links_files_and_reads_back(self):
+        # Covers R1.
+        r = self._create(create_responses([122], [63], "55"),
+                         "--title", "A brand new distinct piece of work",
+                         "--parent", "55", "--after", "101",
+                         "--blocked-by", "122", "--blocks", "63")
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        out = r.stdout
+        self.assertTrue(self.h.created())
+        self.assertIn("board membership   ok", out)
+        self.assertIn("board position     NOT SET", out)
+        self.assertIn("parent             ok (#55)", out)
+        self.assertIn("blocked-by         ok (122)", out)
+        self.assertIn("blocks             ok (63)", out)
+        self.assertEqual(1, len([c for c in self.h.calls()
+                                 if POSITION_MATCH in " ".join(c)]),
+                         "the position write is tried once, never retried")
+        self.assertIn("--adopt 200 --parent 55 --after 101 --blocked-by 122 "
+                      "--blocks 63", r.stderr)
+
+    def test_adopt_that_writes_one_missing_link_succeeds(self):
+        # Covers R2.
+        self.h = Harness("**Design:** none\n",
+                         boards=[ADOPT_PRE_BOARD, ADOPT_POST_BOARD],
+                         responses=adopt_responses(post_blocked=[122]),
+                         graphql_blocked=True)
+        r = self.h.run(*adopt_args(**{"--blocked-by": "122"}), "--no-parent",
+                       "--after", "101")
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertEqual(
+            [("200/dependencies/blocked_by", "issue_id=%d" % issue_id(122))],
+            link_writes(self.h))
+        self.assertIn("blocked-by         ok (122)", r.stdout)
+        self.assertIn("board position     NOT SET", r.stdout)
+        self.assertIn("#200 is wired", r.stdout)
+
+    def test_dry_run_shows_the_neighbourhood_and_duplicate_check(self):
+        # Covers R3.
+        r = self._create(create_responses([], []),
+                         "--title", "A brand new distinct piece of work",
+                         "--no-parent", "--after", "102",
+                         "--blocked-by", "none", "--blocks", "none", "--dry-run")
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertIn("BOARD NEIGHBOURHOOD", r.stdout)
+        self.assertIn("#101", r.stdout)
+        self.assertIn("#103", r.stdout)
+        self.assertIn("POSSIBLE DUPLICATES: none found", r.stdout)
+        self.assertTrue(wrote_nothing(self.h))
+        self.assertFalse([c for c in self.h.calls() if "graphql" in " ".join(c)])
+
+    def test_possible_duplicates_still_stop_with_exit_3(self):
+        r = self._create(create_responses([], []),
+                         "--title", DUPE_TITLE, "--no-parent", "--after", "101",
+                         "--blocked-by", "none", "--blocks", "none",
+                         pre=DUPE_PRE_BOARD, post=DUPE_POST_BOARD)
+        self.assertEqual(3, r.returncode, r.stdout + r.stderr)
+        self.assertIn("164", r.stdout)
+        self.assertTrue(wrote_nothing(self.h))
+        self.assertFalse([c for c in self.h.calls() if "graphql" in " ".join(c)])
 
 
 if __name__ == "__main__":
