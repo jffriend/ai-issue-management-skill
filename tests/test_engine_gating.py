@@ -173,6 +173,64 @@ DEFAULT_BOARD = [
 
 GH_VERSION_LINE = "gh version 2.98.0 (2026-08-20)\n"
 
+# The duplicate check's open-issue listing, `GET repos/{repo}/issues?state=
+# open&per_page=100&page=N`. The listing includes pull requests.
+TITLES_MATCH = "/issues?state=open"
+
+
+def titles_pages(entries):
+    """The open-issue listing as the pages the script asks for, in order.
+
+    100 to a page, the size the script asks for. A full last page is followed
+    by an empty one, because the fake repeats its last reply: without the
+    empty page a run asking for page N+1 would get page N again.
+    """
+    pages = [entries[i:i + 100] for i in range(0, len(entries), 100)] or [[]]
+    if len(pages[-1]) == 100:
+        pages.append([])
+    return [json.dumps(p) for p in pages]
+
+
+# Every issue's numeric REST `id` in the fake: what the sub-issue and
+# dependency endpoints take, never the number. Offset so an id can never be
+# mistaken for a number, and so a test can turn one back into the other.
+ISSUE_ID_BASE = 7000000
+
+
+def issue_id(n):
+    return ISSUE_ID_BASE + int(n)
+
+
+def issue_reply(n, state="open", body="", parent=None):
+    """`GET repos/{repo}/issues/{n}` as GitHub returns it.
+
+    `parent_issue_url` is ABSENT on a parentless issue, not null -- measured
+    2026-10-15 -- so it is added only when there is a parent.
+    """
+    d = {"id": issue_id(n), "number": int(n), "state": state, "body": body,
+         "html_url": "https://github.com/jffriend/photo-consolidation/issues/%d" % int(n)}
+    if parent:
+        d["parent_issue_url"] = (
+            "https://api.github.com/repos/jffriend/photo-consolidation/issues/%d"
+            % int(parent))
+    return d
+
+
+# The issues the tests name as a parent, a blocker or a blocked issue. Create
+# reads each once for its id before writing anything (#14 KTD3). No number
+# here is a prefix of another, because the fake matches on substrings.
+REFERENCED = (55, 63, 70, 77, 122, 133)
+
+
+def referenced_issue_rules():
+    """One `GET repos/{repo}/issues/{n}` rule per referenced issue.
+
+    These go LAST in a table: `issues/55` is also a substring of the
+    `issues/55/sub_issues` write, which the `-X POST` rule must answer first.
+    """
+    return [{"match": "issues/%d" % n, "stdout": json.dumps(issue_reply(n))}
+            for n in REFERENCED]
+
 def probe_rules(version_line=GH_VERSION_LINE):
     """The fake's answer to `gh --version`, the only thing the probe asks.
 
@@ -207,7 +265,7 @@ class Harness:
         # is how a test hands back a board that spans several pages.
         pages = ([board_page(b) for b in boards] if board_stdouts is None
                  else list(board_stdouts))
-        titles = json.dumps([{"number": n, "title": t} for n, t in boards[0]])
+        titles = titles_pages([{"number": n, "title": t} for n, t in boards[0]])
         project = self.config["project_number"]
         board_rule = {"match": "projectsV2/%s/items?per_page=" % project,
                       "stdouts": pages}
@@ -218,7 +276,7 @@ class Harness:
             {"match": "projectsV2/%s/fields" % project,
              "stdout": json.dumps(FIELDS_WITH_STATUS if fields is None
                                   else fields)},
-            {"match": "issue list", "stdout": titles},
+            {"match": TITLES_MATCH, "stdouts": titles},
         ]
         table.extend(probe_rules() if probe is None else probe)
         table.extend(responses or [])
@@ -286,6 +344,17 @@ class Harness:
         """Every call except the probe's offline `gh --version`."""
         return [call for call in self.calls() if call != ["--version"]]
 
+    def create_posts(self):
+        """Every issue-create call: `gh api -X POST repos/{repo}/issues`."""
+        return [c for c in self.calls()
+                if c[:3] == ["api", "-X", "POST"] and len(c) > 3
+                and c[3].startswith("repos/") and c[3].endswith("/issues")
+                and c[3].count("/") == 3]
+
+    def created(self):
+        """True when this run sent an issue create."""
+        return bool(self.create_posts())
+
 
 def full_args(body_file, **over):
     args = {
@@ -314,7 +383,7 @@ class RequiredFlags(unittest.TestCase):
         r = self.h.run(*args)
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertFalse(
-            self.h.called("issue", "create", "--title"),
+            self.h.created(),
             "refusal must happen before any create",
         )
         return r.stdout + r.stderr
@@ -404,15 +473,15 @@ class PhotosConfigShapes(unittest.TestCase):
 
     def test_bug_shape_carries_the_bug_label(self):
         call = self._create_call_for("bug", "A brand new bug")
-        self.assertIn("bug", call)
+        self.assertIn("labels[]=bug", call)
 
     def test_investigation_shape_carries_the_investigation_label(self):
         call = self._create_call_for("investigation", "A brand new investigation")
-        self.assertIn("investigation", call)
+        self.assertIn("labels[]=investigation", call)
 
     def test_work_shape_still_carries_the_work_label(self):
         call = self._create_call_for("work", "A brand new distinct piece of work")
-        self.assertIn("work", call)
+        self.assertIn("labels[]=work", call)
 
 
 class ParentingRule(unittest.TestCase):
@@ -429,7 +498,7 @@ class ParentingRule(unittest.TestCase):
         out = r.stdout + r.stderr
         self.assertIn("--parent", out)
         self.assertIn("docs/plans/", out)
-        self.assertFalse(h.called("issue", "create", "--title"))
+        self.assertFalse(h.created())
 
     def test_plan_derived_body_accepts_a_parent(self):
         h = Harness("Some body.\n\n" + PLAN_DESIGN + "\n")
@@ -457,7 +526,7 @@ class NeighbourCheck(unittest.TestCase):
         self.assertIn("103", r.stdout)
         self.assertIn("104", r.stdout)
         self.assertIn("105", r.stdout)
-        self.assertFalse(h.called("issue", "create", "--title"))
+        self.assertFalse(h.created())
 
     def test_near_duplicate_title_is_reported_prominently(self):
         h = Harness("**Design:** none\n")
@@ -479,11 +548,8 @@ class NeighbourCheck(unittest.TestCase):
         r = h.run(*full_args(h.body_file), "--no-parent", "--top", "--dry-run")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("board", (r.stdout + r.stderr).lower())
-        self.assertFalse(h.called("issue", "create", "--title"))
+        self.assertFalse(h.created())
 
-
-
-NEW_URL = "https://github.com/jffriend/photo-consolidation/issues/200\n"
 
 
 PRE_BOARD = [
@@ -496,9 +562,14 @@ PRE_BOARD = [
 def create_responses(blocked_by, blocking, parent=None, corroborate=""):
     """Canned replies for the create-and-read-back half.
 
-    The read-back rule keys on `--json parent,blockedBy,blocking`, never on a
-    bare `parent`/`blocked-by`/`blocking` token: those words now appear in the
-    `gh issue create` argv too.
+    The issue create is `POST repos/{repo}/issues` with its title as the first
+    field, so `issues -f title=` matches it and nothing else. Every other
+    write -- the sub-issue and dependency POSTs -- is answered by the generic
+    `-X POST` rule after it, which must come before the referenced-issue GETs
+    at the end: `issues/55` is a substring of `issues/55/sub_issues`.
+
+    The read-back rule keys on `--json parent,blockedBy,blocking`; the
+    relationship read-back stays on `gh issue view` until #14's U6.
 
     `corroborate` is the item id the single-issue project-items read returns
     when the board LISTING does not show the issue. Empty by default -- the
@@ -507,7 +578,8 @@ def create_responses(blocked_by, blocking, parent=None, corroborate=""):
     `projectItems` rule, whose substring the corroborating call also carries.
     """
     return [
-        {"match": "issue create", "stdout": NEW_URL},
+        {"match": "issues -f title=", "stdout": json.dumps(issue_reply(200))},
+        {"match": "-X POST", "stdout": "{}"},
         {"match": "item-add", "stdout": json.dumps({"id": "PVTI_new"})},
         {"match": "boardMembershipCorroboration",
          "stdout": (corroborate + "\n") if corroborate else ""},
@@ -524,6 +596,7 @@ def create_responses(blocked_by, blocking, parent=None, corroborate=""):
                 "totalCount": len(blocking),
             },
         })},
+        *referenced_issue_rules(),
     ]
 
 
@@ -564,7 +637,7 @@ class NoPromptOneRun(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("POSSIBLE DUPLICATES: none found", r.stdout)
         self.assertIn("READ-BACK", r.stdout)
-        self.assertTrue(h.called("issue", "create", "--title"))
+        self.assertTrue(h.created())
 
     def test_stdin_is_ignored(self):
         # An `n` that the old prompt would have read as "no" changes nothing.
@@ -572,7 +645,7 @@ class NoPromptOneRun(unittest.TestCase):
         r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101",
                   stdin="n\n")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertTrue(h.called("issue", "create", "--title"))
+        self.assertTrue(h.created())
 
     def test_possible_duplicates_stop_before_any_write_with_exit_3(self):
         h = self._harness(DUPE_PRE_BOARD, DUPE_POST_BOARD)
@@ -584,7 +657,7 @@ class NoPromptOneRun(unittest.TestCase):
         self.assertIn("ABOUT TO CREATE", r.stdout)
         self.assertIn("Nothing was created", r.stderr)
         self.assertIn("--file-anyway", r.stderr)
-        self.assertFalse(h.called("issue", "create", "--title"))
+        self.assertFalse(h.created())
         self.assertFalse(h.called("item-add"))
 
     def test_file_anyway_files_past_possible_duplicates(self):
@@ -594,7 +667,7 @@ class NoPromptOneRun(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("164", r.stdout)
         self.assertIn("READ-BACK", r.stdout)
-        self.assertTrue(h.called("issue", "create", "--title"))
+        self.assertTrue(h.created())
 
     def test_a_failed_duplicate_check_stops_rather_than_reading_as_none(self):
         # With no prompt, DUPES is the stop's only input. A listing the
@@ -602,25 +675,61 @@ class NoPromptOneRun(unittest.TestCase):
         h = self._harness()
         table = json.loads((h.dir / "responses.json").read_text())
         for rule in table:
-            if rule.get("match") == "issue list":
-                rule["stdout"] = "not json"
+            if rule.get("match") == TITLES_MATCH:
+                rule["stdouts"] = ["not json"]
         (h.dir / "responses.json").write_text(json.dumps(table))
         r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("duplicate check failed", r.stderr)
         self.assertNotIn("POSSIBLE DUPLICATES: none found", r.stdout)
-        self.assertFalse(h.called("issue", "create", "--title"))
+        self.assertFalse(h.created())
 
-    def _harness_with_open_issue_count(self, count):
+    def _harness_with_listing(self, entries):
         h = self._harness()
-        titles = [{"number": 1000 + i, "title": f"Unrelated open issue {i}"}
-                  for i in range(count)]
         table = json.loads((h.dir / "responses.json").read_text())
         for rule in table:
-            if rule.get("match") == "issue list":
-                rule["stdout"] = json.dumps(titles)
+            if rule.get("match") == TITLES_MATCH:
+                rule["stdouts"] = titles_pages(entries)
         (h.dir / "responses.json").write_text(json.dumps(table))
         return h
+
+    def _harness_with_open_issue_count(self, count):
+        return self._harness_with_listing(
+            [{"number": 1000 + i, "title": f"Unrelated open issue {i}"}
+             for i in range(count)])
+
+    @staticmethod
+    def _listing_calls(h):
+        return [c for c in h.calls() if any(TITLES_MATCH in a for a in c)]
+
+    def test_a_pull_request_with_a_matching_title_is_not_a_duplicate(self):
+        # The REST listing of open issues includes pull requests. A PR is not
+        # an issue a new one could duplicate, so it never reaches the check.
+        h = self._harness_with_listing([
+            {"number": 300, "title": DUPE_TITLE,
+             "pull_request": {"url": "https://api.github.com/repos/x/y/pulls/300"}},
+            {"number": 101, "title": "First thing on the board"},
+        ])
+        r = h.run(*full_args(h.body_file, **{"--title": DUPE_TITLE}),
+                  "--no-parent", "--after", "101")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("POSSIBLE DUPLICATES: none found", r.stdout)
+        self.assertNotIn("#300", r.stdout)
+        self.assertTrue(h.created())
+
+    def test_an_issue_with_a_matching_title_on_page_two_is_found(self):
+        entries = [{"number": 1000 + i, "title": f"Unrelated open issue {i}"}
+                   for i in range(100)]
+        entries.append({"number": 164, "title":
+                        "Run: re-sort the library into YYYY/MM once the dates are final"})
+        h = self._harness_with_listing(entries)
+        r = h.run(*full_args(h.body_file, **{"--title": DUPE_TITLE}),
+                  "--no-parent", "--after", "101")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("164", r.stdout)
+        calls = self._listing_calls(h)
+        self.assertEqual(2, len(calls), calls)
+        self.assertIn("page=2", " ".join(calls[1]))
 
     def test_a_listing_at_the_limit_warns_that_matches_may_be_missed(self):
         # Issue #17: the check reads at most 500 open issues. A full listing
@@ -630,7 +739,23 @@ class NoPromptOneRun(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("WARNING: the duplicate check read only the first 500",
                       r.stdout)
-        self.assertTrue(h.called("issue", "create", "--title"))
+        self.assertTrue(h.created())
+
+    def test_the_limit_counts_pull_requests_because_they_fill_the_same_pages(self):
+        # 500 raw entries, 100 of them pull requests: only 400 issues were
+        # checked, and the listing still stopped at the limit with more
+        # possibly unread.
+        entries = [{"number": 1000 + i, "title": f"Unrelated open issue {i}"}
+                   for i in range(400)]
+        entries += [{"number": 2000 + i, "title": f"A pull request {i}",
+                     "pull_request": {"url": "x"}} for i in range(100)]
+        h = self._harness_with_listing(entries)
+        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("WARNING: the duplicate check read only the first 500",
+                      r.stdout)
+        self.assertEqual(5, len(self._listing_calls(h)),
+                         "the listing stops at the limit")
 
     def test_a_listing_under_the_limit_does_not_warn(self):
         h = self._harness_with_open_issue_count(499)
@@ -645,7 +770,7 @@ class NoPromptOneRun(unittest.TestCase):
                   "--no-parent", "--after", "101", "--dry-run")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("164", r.stdout)
-        self.assertFalse(h.called("issue", "create", "--title"))
+        self.assertFalse(h.created())
 
 
 class ReadBack(unittest.TestCase):
@@ -672,7 +797,7 @@ class ReadBack(unittest.TestCase):
         h = self._harness()
         r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertTrue(h.called("issue", "create", "--title"))
+        self.assertTrue(h.created())
 
     def test_happy_path_with_a_parent_and_both_directions(self):
         """All five comparisons on NON-EMPTY answers.
@@ -748,12 +873,12 @@ class ReadBack(unittest.TestCase):
         # before item-add runs, and item-add then refuses with "Content
         # already exists in this project". pluckd #504 and #508 both came back
         # HALF-WIRED this way. The id must come from the by-number lookup.
-        responses = create_responses([], [])
-        responses[1] = {"match": "item-add", "exit": 1, "stderr":
-                        "GraphQL: Content already exists in this project "
-                        "(addProjectV2ItemById)\n"}
-        responses.insert(2, {"match": "boardItemByIssueNumber",
-                             "stdout": "PVTI_auto_added\n"})
+        responses = override(create_responses([], []), "item-add", exit=1,
+                             stderr="GraphQL: Content already exists in this "
+                                    "project (addProjectV2ItemById)\n")
+        at = [r["match"] for r in responses].index("item-add") + 1
+        responses.insert(at, {"match": "boardItemByIssueNumber",
+                              "stdout": "PVTI_auto_added\n"})
         h = Harness(
             "**Design:** none\n",
             boards=[PRE_BOARD, [
@@ -851,89 +976,150 @@ class CapabilityProbe(unittest.TestCase):
         self.assertEqual([], h.calls())
 
 
-class NativeWritePath(unittest.TestCase):
+class RestWritePath(unittest.TestCase):
     """
-    Parent and both blocking directions are set by the same call that creates
-    the issue, through gh's own flags. No node id is resolved anywhere.
+    #14 U3: create writes over REST. The issue is one POST; then the parent is
+    one sub_issues POST and each blocking link one dependencies POST, each
+    carrying a numeric issue `id` -- the parent link and every blocks link the
+    NEW issue's, every blocked-by link the blocker's. Every referenced issue
+    is read for its id before anything is written (KTD3).
     """
 
-    def _create_argv(self, h):
-        for call in h.calls():
-            if call[:2] == ["issue", "create"]:
-                return call
-        return None
+    BOARD_AFTER = [
+        (101, "First thing on the board"),
+        (200, "A brand new distinct piece of work"),
+        (102, "Second thing"),
+    ]
 
-    def test_create_call_carries_all_three_flags(self):
-        board_after = [
-            (101, "First thing on the board"),
-            (200, "A brand new distinct piece of work"),
-            (102, "Second thing"),
-        ]
+    def _run(self, *args, responses=None, blocked=(), blocking=(), parent=None):
         h = Harness(
             "**Design:** none\n",
-            boards=[PRE_BOARD, board_after],
-            responses=create_responses([122], [63], "55"),
+            boards=[PRE_BOARD, self.BOARD_AFTER],
+            responses=(responses if responses is not None else
+                       create_responses(list(blocked), list(blocking), parent)),
         )
-        r = h.run(
-            "--title", "A brand new distinct piece of work",
-            "--body-file", str(h.body_file), "--shape", "work",
-            "--parent", "55", "--after", "101",
-            "--blocked-by", "122", "--blocks", "63",
-        )
+        return h, h.run("--title", "A brand new distinct piece of work",
+                        "--body-file", str(h.body_file), "--shape", "work",
+                        *args)
+
+    def test_parent_two_blockers_and_one_blocked_issue_are_five_writes(self):
+        h, r = self._run("--parent", "55", "--after", "101",
+                         "--blocked-by", "122,133", "--blocks", "63",
+                         blocked=[122, 133], blocking=[63], parent="55")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        argv = self._create_argv(h)
-        self.assertIsNotNone(argv, "a real create must have been issued")
-        self.assertIn("--parent", argv)
-        self.assertEqual("55", argv[argv.index("--parent") + 1])
-        self.assertIn("--blocked-by", argv)
-        self.assertEqual("122", argv[argv.index("--blocked-by") + 1])
-        self.assertIn("--blocking", argv)
-        self.assertEqual("63", argv[argv.index("--blocking") + 1])
-        self.assertFalse(h.called("sub_issues"))
-        self.assertFalse(h.called("dependencies"))
+        self.assertEqual(1, len(h.create_posts()), h.calls())
+        self.assertEqual(sorted([
+            ("55/sub_issues", "sub_issue_id=%d" % issue_id(200)),
+            ("200/dependencies/blocked_by", "issue_id=%d" % issue_id(122)),
+            ("200/dependencies/blocked_by", "issue_id=%d" % issue_id(133)),
+            ("63/dependencies/blocked_by", "issue_id=%d" % issue_id(200)),
+        ]), sorted(link_writes(h)))
+        self.assertIn("parent             ok (#55)", r.stdout)
+        self.assertIn("blocked-by         ok (122,133)", r.stdout)
+        self.assertIn("blocks             ok (63)", r.stdout)
 
-    def test_none_answers_omit_the_flags_rather_than_passing_them_empty(self):
-        board_after = [
-            (101, "First thing on the board"),
-            (200, "A brand new distinct piece of work"),
-            (102, "Second thing"),
-        ]
-        h = Harness(
-            "**Design:** none\n",
-            boards=[PRE_BOARD, board_after],
-            responses=create_responses([], [], None),
-        )
-        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
+    def test_every_link_is_written_after_the_issue_and_every_read_before_it(self):
+        h, r = self._run("--parent", "55", "--after", "101",
+                         "--blocked-by", "122", "--blocks", "63",
+                         blocked=[122], blocking=[63], parent="55")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        argv = self._create_argv(h)
-        self.assertIsNotNone(argv)
-        for flag in ("--parent", "--blocked-by", "--blocking"):
-            self.assertNotIn(flag, argv,
-                             "an unanswered relationship is an OMITTED flag, "
-                             "never an empty one")
+        calls = h.calls()
+        create_at = calls.index(h.create_posts()[0])
+        for n in (55, 122, 63):
+            reads = [i for i, c in enumerate(calls)
+                     if c == ["api", "repos/jffriend/photo-consolidation/issues/%d" % n]]
+            self.assertEqual(1, len(reads), "#%d is read once for its id" % n)
+            self.assertLess(reads[0], create_at)
+        for i, c in enumerate(calls):
+            if c[:3] == ["api", "-X", "POST"] and i != create_at:
+                self.assertGreater(i, create_at, c)
 
-    def test_no_call_resolves_an_issue_node_id(self):
-        board_after = [
-            (101, "First thing on the board"),
-            (200, "A brand new distinct piece of work"),
-            (102, "Second thing"),
-        ]
-        h = Harness(
-            "**Design:** none\n",
-            boards=[PRE_BOARD, board_after],
-            responses=create_responses([122], [63], "55"),
-        )
-        h.run(
-            "--title", "A brand new distinct piece of work",
-            "--body-file", str(h.body_file), "--shape", "work",
-            "--parent", "55", "--after", "101",
-            "--blocked-by", "122", "--blocks", "63",
-        )
+    def test_the_create_carries_title_body_and_labels(self):
+        h, r = self._run("--no-parent", "--after", "101",
+                         "--blocked-by", "none", "--blocks", "none")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        argv = h.create_posts()[0]
+        self.assertEqual("repos/jffriend/photo-consolidation/issues", argv[3])
+        self.assertIn("title=A brand new distinct piece of work", argv)
+        self.assertIn("body=@%s" % h.body_file, argv)
+        self.assertIn("labels[]=work", argv)
+
+    def test_none_answers_write_no_link_at_all(self):
+        h, r = self._run("--no-parent", "--after", "101",
+                         "--blocked-by", "none", "--blocks", "none")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual([], link_writes(h),
+                         "an unanswered relationship is no write, never an empty one")
+
+    def test_a_blocker_that_does_not_exist_refuses_before_the_create(self):
+        responses = [{"match": "issues/999", "exit": 1,
+                      "stderr": "gh: Not Found (HTTP 404)\n"}] \
+            + create_responses([], [])
+        h, r = self._run("--no-parent", "--after", "101",
+                         "--blocked-by", "999", "--blocks", "none",
+                         responses=responses)
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        self.assertIn("#999 does not exist", r.stderr)
+        self.assertIn("Nothing was created.", r.stderr)
+        self.assertFalse(h.created())
+        self.assertTrue(wrote_nothing(h))
+
+    def test_a_blocker_that_cannot_be_read_refuses_without_saying_it_is_missing(self):
+        responses = [{"match": "issues/122", "exit": 1,
+                      "stderr": "gh: Server Error (HTTP 502)\n"}] \
+            + create_responses([], [])
+        h, r = self._run("--no-parent", "--after", "101",
+                         "--blocked-by", "122", "--blocks", "none",
+                         responses=responses)
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        self.assertIn("#122 could not be read", r.stderr)
+        self.assertNotIn("does not exist", r.stderr)
+        self.assertIn("Nothing was created.", r.stderr)
+        self.assertTrue(wrote_nothing(h))
+
+    def test_a_failed_link_write_warns_and_the_read_back_refuses(self):
+        responses = [{"match": "-X POST repos/jffriend/photo-consolidation/"
+                               "issues/200/dependencies/blocked_by",
+                      "exit": 1, "stderr": "gh: Validation Failed (HTTP 422)\n"}] \
+            + create_responses([], [])
+        h, r = self._run("--no-parent", "--after", "101",
+                         "--blocked-by", "122", "--blocks", "none",
+                         responses=responses)
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        err = r.stderr
+        self.assertIn("WARNING", err)
+        self.assertIn("HTTP 422", err, "gh's own reason reaches the operator")
+        self.assertIn("MISMATCH: blocked-by", err)
+        self.assertTrue(h.called("updateProjectV2ItemPosition"),
+                        "a failed link does not stop the run before the read-back")
+        lines = err.splitlines()
+        finish = [i for i, ln in enumerate(lines) if ln.startswith("Finish it")]
+        self.assertEqual(1, len(finish), err)
+        command = lines[finish[0] + 1]
+        self.assertEqual(
+            "  bash %s --config %s --adopt 200 --no-parent --after 101 "
+            "--blocked-by 122 --blocks none" % (FILE_ISSUE, h.config_path),
+            command, "the remedy leads with the runnable adopt command")
+        tail = "\n".join(lines[finish[0] + 2:])
+        self.assertIn("delete #200 and re-run", tail)
+        self.assertIn("local session", tail)
+        self.assertNotIn("delete", "\n".join(lines[:finish[0] + 2])
+                         .replace("Do not delete", ""))
+
+    def test_no_create_goes_through_gh_issue_or_graphql(self):
+        h, r = self._run("--parent", "55", "--after", "101",
+                         "--blocked-by", "122", "--blocks", "63",
+                         blocked=[122], blocking=[63], parent="55")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         for call in h.calls():
             joined = " ".join(call)
-            self.assertNotIn("--jq .id", joined)
-            self.assertNotIn("sub_issues", joined)
-            self.assertNotIn("dependencies/", joined)
+            self.assertNotEqual(["issue", "create"], call[:2], call)
+            self.assertNotEqual(["issue", "list"], call[:2], call)
+            if "graphql" in joined:
+                # The board item lookups leave GraphQL in #14's U5; until
+                # then they and the position write are the only calls on it.
+                self.assertTrue("updateProjectV2ItemPosition" in joined
+                                or "projectItems" in joined, call)
 
     def test_the_relationship_read_back_is_one_call(self):
         board_after = [
@@ -994,29 +1180,42 @@ def rel_json(parent=None, blocked_by=(), blocking=()):
     }
 
 
+def dependency_list(numbers):
+    """`GET .../dependencies/blocked_by` or `/blocking`: an array of issues."""
+    return json.dumps([{"number": int(n), "id": issue_id(n)} for n in numbers])
+
+
 def adopt_responses(pre_parent=None, pre_blocked=(), pre_blocking=(),
                     post_parent=None, post_blocked=(), post_blocking=(),
-                    state="OPEN", body="**Design:** none\n",
-                    view_exit=0, view_stdout=None,
-                    edit_exit=0, item_by_number="PVTI_adopt",
-                    corroborate=""):
+                    state="open", body="**Design:** none\n",
+                    issue_exit=0, issue_stdout=None,
+                    write_exit=0, item_by_number="PVTI_adopt",
+                    corroborate="", blocked_stdout=None):
     """Canned replies for an adopt run.
 
-    The PRE-FETCH and the READ-BACK are two different `gh issue view` calls and
-    they must be answerable differently -- the pre-fetch has to show no
-    conflicting links or the KD2 refusal fires, while the read-back has to show
-    the links just written. They are told apart by their `--json` field lists,
-    and the pre-fetch rule comes FIRST because its field list contains the
-    read-back's as a substring.
+    The PRE-FETCH is three REST reads -- the issue and its two dependency
+    lists -- and the READ-BACK is still the one `gh issue view --json
+    parent,blockedBy,blocking` until #14's U6. They must be answerable
+    differently: the pre-fetch has to show no conflicting links or the KD2
+    refusal fires, while the read-back has to show the links just written.
+
+    ORDER MATTERS, because the fake matches substrings. The `-X POST` rule
+    comes first, since every write's path also names an issue a read rule
+    matches. The two dependency-list reads come before the bare issue read
+    `issues/200`, which is a substring of both. `item-add` comes before that
+    too: its `--url` carries `issues/200`.
     """
-    pre = dict(rel_json(pre_parent, pre_blocked, pre_blocking))
-    pre["state"] = state
-    pre["body"] = body
-    if view_stdout is None:
-        view_stdout = json.dumps(pre)
+    if issue_stdout is None:
+        issue_stdout = json.dumps(issue_reply(ADOPT_NUM, state=state, body=body,
+                                              parent=pre_parent))
+    if blocked_stdout is None:
+        blocked_stdout = dependency_list(pre_blocked)
     return [
-        {"match": "--json state,body,parent,blockedBy,blocking",
-         "stdout": view_stdout, "exit": view_exit},
+        {"match": "-X POST", "stdout": "{}", "exit": write_exit},
+        {"match": "issues/%s/dependencies/blocked_by?" % ADOPT_NUM,
+         "stdout": blocked_stdout},
+        {"match": "issues/%s/dependencies/blocking?" % ADOPT_NUM,
+         "stdout": dependency_list(pre_blocking)},
         # The by-issue-number item lookup carries a marker literal in its
         # GraphQL text. Without it the generic `projectItems` rule below would
         # hand adopt the `--after` item's id and the test would prove nothing.
@@ -1028,10 +1227,12 @@ def adopt_responses(pre_parent=None, pre_blocked=(), pre_blocking=(),
          "stdout": (corroborate + "\n") if corroborate else ""},
         {"match": "projectItems", "stdout": "PVTI_after\n"},
         {"match": "item-add", "stdout": json.dumps({"id": "PVTI_from_item_add"})},
-        {"match": "issue edit", "stdout": "", "exit": edit_exit},
         {"match": "updateProjectV2ItemPosition", "stdout": json.dumps({"data": {}})},
         {"match": "--json parent,blockedBy,blocking",
          "stdout": json.dumps(rel_json(post_parent, post_blocked, post_blocking))},
+        {"match": "issues/%s" % ADOPT_NUM, "stdout": issue_stdout,
+         "exit": issue_exit},
+        *referenced_issue_rules(),
     ]
 
 
@@ -1053,19 +1254,31 @@ def adopt_args(num=ADOPT_NUM, **over):
     return out
 
 
-def edit_argv(h):
-    """The one real `gh issue edit` argv, or None."""
+def link_writes(h):
+    """Every relationship write, as (path after `/issues/`, its id field).
+
+    `("55/sub_issues", "sub_issue_id=7000200")` puts #200 under #55;
+    `("200/dependencies/blocked_by", "issue_id=7000122")` makes #200 blocked
+    by #122.
+    """
+    out = []
     for call in h.calls():
-        if call[:2] == ["issue", "edit"]:
-            return call
-    return None
+        if call[:3] != ["api", "-X", "POST"] or len(call) < 4:
+            continue
+        path = call[3]
+        if "/sub_issues" in path or "/dependencies/" in path:
+            fields = [a for a in call[4:] if "_id=" in a]
+            out.append((path.split("/issues/", 1)[1],
+                        fields[0] if fields else ""))
+    return out
 
 
 def create_argv(h):
-    for call in h.calls():
-        if call[:2] == ["issue", "create"]:
-            return call
-    return None
+    posts = h.create_posts()
+    return posts[0] if posts else None
+
+
+WRITE_METHODS = ("POST", "PATCH", "PUT", "DELETE")
 
 
 def wrote_nothing(h):
@@ -1073,6 +1286,9 @@ def wrote_nothing(h):
     for call in h.calls():
         joined = " ".join(call)
         if call[:2] in (["issue", "edit"], ["issue", "create"]):
+            return False
+        if call[:1] == ["api"] and "-X" in call \
+                and call[call.index("-X") + 1] in WRITE_METHODS:
             return False
         if "item-add" in joined or "updateProjectV2ItemPosition" in joined:
             return False
@@ -1137,18 +1353,62 @@ class AdoptGate(unittest.TestCase):
         self.assertEqual([], h.network_calls())
 
     def test_a_nonexistent_issue_refuses_before_any_write(self):
-        h = adopt_harness(view_stdout="", view_exit=1)
+        h = Harness("**Design:** none\n",
+                    responses=[{"match": "issues/999", "exit": 1,
+                                "stderr": "gh: Not Found (HTTP 404)\n"}]
+                    + adopt_responses())
         r = h.run(*adopt_args(num="999"), "--no-parent", "--top")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("999", r.stdout + r.stderr)
         self.assertTrue(wrote_nothing(h))
 
     def test_a_closed_issue_refuses_before_any_write(self):
-        h = adopt_harness(state="CLOSED")
+        # REST spells the state in lower case.
+        h = adopt_harness(state="closed")
         r = h.run(*adopt_args(), "--no-parent", "--top")
         self.assertNotEqual(r.returncode, 0)
         out = r.stdout + r.stderr
-        self.assertIn("CLOSED", out)
+        self.assertIn("is closed, not open", out)
+        self.assertTrue(wrote_nothing(h))
+
+    def test_a_parentless_issue_has_no_parent_key_and_reads_as_no_parent(self):
+        # GitHub OMITS parent_issue_url on a parentless issue (measured
+        # 2026-10-15). Absent is a legal answer, so adopt must read it as "no
+        # parent" and write the one asked for.
+        h = adopt_harness(post_parent="55")
+        self.assertNotIn("parent_issue_url",
+                         issue_reply(ADOPT_NUM), "precondition: key absent")
+        r = h.run(*adopt_args(), "--parent", "55", "--after", "101")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual([("55/sub_issues", "sub_issue_id=%d" % issue_id(200))],
+                         link_writes(h))
+
+    def test_an_issue_reply_without_number_and_state_refuses(self):
+        # {"message": ...} is a reply whose every field extracts as absent,
+        # and absent is a legal parent answer. Only its shape tells it apart.
+        h = adopt_harness(issue_stdout=json.dumps({"message": "Not Found"}))
+        r = h.run(*adopt_args(), "--no-parent", "--top")
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        self.assertIn("could not be read", r.stderr)
+        self.assertTrue(wrote_nothing(h))
+
+    def test_a_malformed_parent_url_refuses_rather_than_reading_as_no_parent(self):
+        reply = issue_reply(ADOPT_NUM)
+        reply["parent_issue_url"] = "https://api.github.com/repos/x/y/issues/"
+        h = adopt_harness(issue_stdout=json.dumps(reply))
+        r = h.run(*adopt_args(), "--no-parent", "--top")
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        self.assertIn("parent", r.stderr)
+        self.assertIn("could not be read", r.stderr)
+        self.assertTrue(wrote_nothing(h))
+
+    def test_a_dependency_list_that_is_not_an_array_refuses(self):
+        # An object here would extract as no blockers, which is legal too.
+        h = adopt_harness(blocked_stdout=json.dumps({"message": "Not Found"}))
+        r = h.run(*adopt_args(), "--no-parent", "--top")
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        self.assertIn("blocked-by", r.stderr)
+        self.assertIn("could not be read", r.stderr)
         self.assertTrue(wrote_nothing(h))
 
     def test_a_plan_derived_adopted_body_refuses_no_parent(self):
@@ -1181,7 +1441,8 @@ class AdoptGate(unittest.TestCase):
 class AdoptContradiction(unittest.TestCase):
     """
     KD2: refuse rather than reconcile, and make every refusal CLEARABLE by
-    printing the exact `gh issue edit --remove-*` command.
+    printing the exact REST command that removes the link (#14 KTD9). Each
+    names a numeric issue `id`, taken from the replies adopt already read.
     """
 
     def test_an_existing_different_parent_refuses_and_names_the_clearing_command(self):
@@ -1191,8 +1452,9 @@ class AdoptContradiction(unittest.TestCase):
         out = r.stdout + r.stderr
         self.assertIn("77", out, "must name what it found")
         self.assertIn("55", out, "must name what was asked for")
-        self.assertIn("gh issue edit 200 --repo jffriend/photo-consolidation "
-                      "--remove-parent", out)
+        self.assertIn("gh api -X DELETE repos/jffriend/photo-consolidation/"
+                      "issues/77/sub_issue -F sub_issue_id=%d" % issue_id(200),
+                      out)
         self.assertTrue(wrote_nothing(h))
 
     def test_an_existing_parent_under_no_parent_refuses_the_same_way(self):
@@ -1201,7 +1463,7 @@ class AdoptContradiction(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         out = r.stdout + r.stderr
         self.assertIn("77", out)
-        self.assertIn("--remove-parent", out)
+        self.assertIn("issues/77/sub_issue -F sub_issue_id=", out)
         self.assertTrue(wrote_nothing(h))
 
     def test_unnamed_blocked_by_links_refuse_and_name_the_clearing_command(self):
@@ -1211,18 +1473,40 @@ class AdoptContradiction(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         out = r.stdout + r.stderr
         self.assertIn("133", out, "must name the link not asked for")
-        self.assertIn("gh issue edit 200 --repo jffriend/photo-consolidation "
-                      "--remove-blocked-by 133", out)
+        self.assertIn("gh api -X DELETE repos/jffriend/photo-consolidation/"
+                      "issues/200/dependencies/blocked_by/%d" % issue_id(133), out)
+        self.assertNotIn("blocked_by/%d" % issue_id(122), out,
+                         "a link that was asked for is not cleared")
         self.assertTrue(wrote_nothing(h))
 
     def test_unnamed_blocks_links_refuse_and_name_the_clearing_command(self):
+        # A blocks link is the blocked issue's blocked-by link, so it is
+        # cleared against #63, by #200's id.
         h = adopt_harness(pre_blocking=[63])
         r = h.run(*adopt_args(), "--no-parent", "--after", "101")
         self.assertNotEqual(r.returncode, 0)
         out = r.stdout + r.stderr
         self.assertIn("63", out)
-        self.assertIn("gh issue edit 200 --repo jffriend/photo-consolidation "
-                      "--remove-blocking 63", out)
+        self.assertIn("gh api -X DELETE repos/jffriend/photo-consolidation/"
+                      "issues/63/dependencies/blocked_by/%d" % issue_id(200), out)
+        self.assertTrue(wrote_nothing(h))
+
+    def test_an_unnamed_blocks_link_into_another_repo_is_cleared_in_that_repo(self):
+        # Dependency lists carry issues from other repos too (measured
+        # 2026-10-15: this repo's #14 blocks jffriend/pluckd#577). The link
+        # lives on the blocked issue, so the remedy must name ITS repo.
+        blocking = json.dumps([{
+            "number": 577, "id": 5872918136,
+            "repository_url": "https://api.github.com/repos/jffriend/pluckd"}])
+        responses = override(adopt_responses(), "issues/200/dependencies/blocking?",
+                             stdout=blocking)
+        h = Harness("**Design:** none\n", boards=[ADOPT_PRE_BOARD, ADOPT_POST_BOARD],
+                    responses=responses)
+        r = h.run(*adopt_args(), "--no-parent", "--after", "101")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("gh api -X DELETE repos/jffriend/pluckd/"
+                      "issues/577/dependencies/blocked_by/%d" % issue_id(200),
+                      r.stderr)
         self.assertTrue(wrote_nothing(h))
 
 
@@ -1238,45 +1522,40 @@ class AdoptDelta(unittest.TestCase):
           Issue may not contain duplicate sub-issues (addSubIssue)
 
     So the apply step sends a DELTA, not a set. Anything already correct is
-    skipped; anything contradicting has already been refused above.
+    skipped; anything contradicting has already been refused above. Over REST
+    each link is its own POST (#14 U4), and the delta decides which are sent.
     """
 
     def test_an_already_correct_parent_is_not_sent_again(self):
         h = adopt_harness(pre_parent="55", post_parent="55")
         r = h.run(*adopt_args(), "--parent", "55", "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        argv = edit_argv(h)
-        if argv is not None:
-            self.assertNotIn("--parent", argv,
-                             "a parent already correct must not be re-added")
+        self.assertEqual([], link_writes(h),
+                         "a parent already correct must not be re-added")
 
     def test_an_already_present_blocker_is_omitted_and_the_others_are_sent(self):
         h = adopt_harness(pre_blocked=[122], post_blocked=[122, 133])
         r = h.run(*adopt_args(**{"--blocked-by": "122,133"}), "--no-parent",
                   "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        argv = edit_argv(h)
-        self.assertIsNotNone(argv, "the missing blocker still has to be written")
-        self.assertIn("--add-blocked-by", argv)
-        self.assertEqual("133", argv[argv.index("--add-blocked-by") + 1],
-                         "only the link that is not already there is sent")
+        self.assertEqual(
+            [("200/dependencies/blocked_by", "issue_id=%d" % issue_id(133))],
+            link_writes(h), "only the link that is not already there is sent")
 
     def test_an_already_present_blocking_link_is_omitted_and_the_others_are_sent(self):
         """The `blocks` mirror of the blocked-by test above.
 
         Photos' original suite only carried this shape for parent and
-        blocked-by; blocking is the third relationship kind `EDIT_ARGS`
-        computes a delta for and needs its own proof.
+        blocked-by; blocking is the third relationship kind the delta is
+        computed for and needs its own proof.
         """
         h = adopt_harness(pre_blocking=[63], post_blocking=[63, 70])
         r = h.run(*adopt_args(**{"--blocks": "63,70"}), "--no-parent",
                   "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        argv = edit_argv(h)
-        self.assertIsNotNone(argv, "the missing blocking link still has to be written")
-        self.assertIn("--add-blocking", argv)
-        self.assertEqual("70", argv[argv.index("--add-blocking") + 1],
-                         "only the link that is not already there is sent")
+        self.assertEqual(
+            [("70/dependencies/blocked_by", "issue_id=%d" % issue_id(200))],
+            link_writes(h), "only the link that is not already there is sent")
 
     def test_the_position_write_is_issued_even_when_the_position_already_matches(self):
         """Position is the fourth placement answer, and the ONE relationship
@@ -1284,9 +1563,8 @@ class AdoptDelta(unittest.TestCase):
         blocked-by and blocks when the server already disagrees, and skips
         writing them again when the server already agrees -- but adopt does
         not refuse a reposition (all four placement answers are mandatory,
-        so a position is always named), and there is no `--position` flag on
-        `gh issue edit` to omit in the first place: the write is a separate
-        GraphQL mutation (`updateProjectV2ItemPosition`), issued
+        so a position is always named), and there is no REST position write
+        to omit in the first place: the write is a separate GraphQL mutation (`updateProjectV2ItemPosition`), issued
         unconditionally every time. This pins that as intentional, not a gap
         in the delta logic.
         """
@@ -1298,14 +1576,15 @@ class AdoptDelta(unittest.TestCase):
         self.assertEqual(1, len(positions),
                          "the position write is unconditional, not delta-gated")
 
-    def test_everything_already_present_issues_no_edit_at_all_and_still_reads_back(self):
+    def test_everything_already_present_issues_no_write_at_all_and_still_reads_back(self):
         h = adopt_harness(pre_parent="55", pre_blocked=[122], pre_blocking=[63],
                           post_parent="55", post_blocked=[122], post_blocking=[63])
         r = h.run("--adopt", ADOPT_NUM, "--parent", "55", "--after", "101",
                   "--blocked-by", "122", "--blocks", "63")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIsNone(edit_argv(h),
-                          "an empty delta must issue no gh issue edit at all")
+        self.assertEqual([], link_writes(h),
+                         "an empty delta must issue no link write at all")
+        self.assertIn("no write issued", r.stdout)
         out = r.stdout
         self.assertIn("board membership   ok", out)
         self.assertIn("board position     ok", out)
@@ -1314,10 +1593,10 @@ class AdoptDelta(unittest.TestCase):
         self.assertIn("blocks             ok (63)", out)
 
     def test_a_partially_applied_edit_is_caught_and_not_reported_as_nothing_written(self):
-        # The edit exits non-zero after the parent landed and the blocker did
-        # not. One rejected flag fails the whole call server-side, so "it
-        # exited non-zero" is not evidence that nothing was written.
-        h = adopt_harness(post_parent="55", post_blocked=[], edit_exit=1)
+        # Every write exits non-zero, yet the parent landed and the blocker
+        # did not. "It exited non-zero" is not evidence that nothing was
+        # written, so the read-back is what decides.
+        h = adopt_harness(post_parent="55", post_blocked=[], write_exit=1)
         r = h.run("--adopt", ADOPT_NUM, "--parent", "55", "--after", "101",
                   "--blocked-by", "122", "--blocks", "none")
         self.assertNotEqual(r.returncode, 0)
@@ -1542,18 +1821,29 @@ class OneImplementation(unittest.TestCase):
                 self.assertTrue(any("read_back" in p for p in problems), problems)
 
 
-PROVENANCE_PREFIXES = ("It is left", "Finish it by hand")
+PROVENANCE_PREFIXES = ("It is left", "Finish it", "In a local session")
 
 
 def failure_lines(stderr):
-    """The failure output minus the two lines that legitimately differ.
+    """The failure output minus the lines that legitimately differ.
 
     Only the provenance sentence and the next action depend on whether this run
     created the issue. Everything else -- the MISMATCH sentence and the
     requested-state summary -- must be byte-identical between the modes.
+
+    Create's next action is three lines (#14 KTD4): a "Finish it" line, the
+    adopt command on the line after it, and the local-session alternative.
+    The command line is dropped only where it follows a "Finish it" line, so
+    the re-verification command the other refusals print is still compared.
     """
-    return [ln for ln in stderr.splitlines()
-            if not ln.startswith(PROVENANCE_PREFIXES)]
+    out, after_finish = [], False
+    for ln in stderr.splitlines():
+        drop = ln.startswith(PROVENANCE_PREFIXES) \
+            or (after_finish and ln.startswith("  bash "))
+        after_finish = ln.startswith("Finish it")
+        if not drop:
+            out.append(ln)
+    return out
 
 
 class BehaviouralEquivalence(unittest.TestCase):
@@ -1588,9 +1878,17 @@ class BehaviouralEquivalence(unittest.TestCase):
         h = Harness("**Design:** none\n",
                     boards=[PRE_BOARD, board_after],
                     responses=create_responses(blocked, blocking, parent))
-        return h.run("--title", "A brand new distinct piece of work",
-                     "--body-file", str(h.body_file), "--shape", "work",
-                     *args)
+        return self._same_config(h, h.run(
+            "--title", "A brand new distinct piece of work",
+            "--body-file", str(h.body_file), "--shape", "work", *args))
+
+    @staticmethod
+    def _same_config(h, r):
+        # Each harness has its own temp --config path, and the re-verify
+        # command prints it. That is the one difference that is not the
+        # read-back's, so it is named out before comparing.
+        r.stderr = r.stderr.replace(str(h.config_path), "<config>")
+        return r
 
     def _adopt(self, board_after, parent, blocked, blocking, args):
         h = Harness("**Design:** none\n",
@@ -1598,7 +1896,7 @@ class BehaviouralEquivalence(unittest.TestCase):
                     responses=adopt_responses(post_parent=parent,
                                               post_blocked=blocked,
                                               post_blocking=blocking))
-        return h.run("--adopt", ADOPT_NUM, *args)
+        return self._same_config(h, h.run("--adopt", ADOPT_NUM, *args))
 
     def _compare(self, create_r, adopt_r):
         self.assertNotEqual(create_r.returncode, 0, create_r.stdout)
@@ -1652,31 +1950,30 @@ class BehaviouralEquivalence(unittest.TestCase):
             self._adopt(ADOPT_POST_BOARD, None, [], [], args))
 
 
-# create's flag names, canonicalised to adopt's. An EXPLICIT map, so a fourth
-# relationship added to one mode fails this test instead of slipping past an
-# enumeration that silently stopped covering it.
-RELATIONSHIP_FLAG_MAP = {
-    "--parent": "--parent",
-    "--blocked-by": "--add-blocked-by",
-    "--blocking": "--add-blocking",
-    "--add-blocked-by": "--add-blocked-by",
-    "--add-blocking": "--add-blocking",
-}
-NOT_RELATIONSHIPS = {"--no-parent"}
+def relationship_set(h):
+    """Every relationship this run wrote, as {(kind, other issue number)}.
 
-
-def relationship_set(argv):
-    """Every relationship-bearing flag in an argv, as {(canonical, value)}."""
+    Read off the REST writes `link_writes` returns, with each numeric id
+    turned back into its number. An EXPLICIT mapping, so a write of a fourth
+    kind fails this test instead of slipping past an enumeration that silently
+    stopped covering it.
+    """
     out = set()
-    for i, arg in enumerate(argv):
-        if not arg.startswith("--") or arg in NOT_RELATIONSHIPS:
-            continue
-        if arg in RELATIONSHIP_FLAG_MAP:
-            out.add((RELATIONSHIP_FLAG_MAP[arg], argv[i + 1]))
-        elif "parent" in arg or "block" in arg:
+    for path, field in link_writes(h):
+        target, _, endpoint = path.partition("/")
+        if not field:
+            raise AssertionError("relationship write with no id field: %r" % path)
+        other = int(field.split("=", 1)[1]) - ISSUE_ID_BASE
+        if endpoint == "sub_issues" and other == int(ADOPT_NUM):
+            out.add(("parent", int(target)))
+        elif endpoint == "dependencies/blocked_by" and target == ADOPT_NUM:
+            out.add(("blocked-by", other))
+        elif endpoint == "dependencies/blocked_by" and other == int(ADOPT_NUM):
+            out.add(("blocks", int(target)))
+        else:
             raise AssertionError(
-                "unmapped relationship-bearing flag %r -- add it to "
-                "RELATIONSHIP_FLAG_MAP so parity keeps binding" % arg)
+                "unmapped relationship write %r %r -- map it in "
+                "relationship_set so parity keeps binding" % (path, field))
     return out
 
 
@@ -1705,17 +2002,15 @@ class WriteShapeParity(unittest.TestCase):
                   "--body-file", str(h.body_file), "--shape", "work",
                   *args)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        argv = create_argv(h)
-        self.assertIsNotNone(argv)
-        return relationship_set(argv)
+        self.assertIsNotNone(create_argv(h))
+        return relationship_set(h)
 
     def _adopt_set(self, args, blocked, blocking, parent):
         h = adopt_harness(post_parent=parent, post_blocked=blocked,
                           post_blocking=blocking)
         r = h.run("--adopt", ADOPT_NUM, *args)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        argv = edit_argv(h)
-        return relationship_set(argv) if argv else set()
+        return relationship_set(h)
 
     def test_all_three_relationships_are_written_the_same_by_both_modes(self):
         args = ["--parent", "55", "--after", "101", "--blocked-by", "122",
@@ -2225,11 +2520,11 @@ class DuplicateNumbersInAnAnswer(unittest.TestCase):
                   "--blocked-by", "122,122", "--blocks", "none")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("blocked-by         ok (122)", r.stdout)
-        argv = create_argv(h)
-        self.assertEqual("122", argv[argv.index("--blocked-by") + 1],
-                         "the WRITE must not carry the repeat either -- "
-                         "gh rejects an already-present link and fails the "
-                         "whole call")
+        self.assertEqual(
+            [("200/dependencies/blocked_by", "issue_id=%d" % issue_id(122))],
+            link_writes(h),
+            "the WRITE must not carry the repeat either -- a second write of "
+            "an already-present link is refused")
 
     def test_a_repeated_blocker_reads_back_as_correctly_wired_on_adopt(self):
         h = adopt_harness(post_blocked=[122])
@@ -2237,10 +2532,9 @@ class DuplicateNumbersInAnAnswer(unittest.TestCase):
                   "--blocked-by", "122,122", "--blocks", "none")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("blocked-by         ok (122)", r.stdout)
-        argv = edit_argv(h)
-        self.assertIsNotNone(argv)
-        self.assertEqual("122", argv[argv.index("--add-blocked-by") + 1],
-                         "the adopt delta must not emit a repeat")
+        self.assertEqual(
+            [("200/dependencies/blocked_by", "issue_id=%d" % issue_id(122))],
+            link_writes(h), "the adopt delta must not emit a repeat")
 
     def test_a_repeated_blocks_number_behaves_the_same_way(self):
         h = Harness(
@@ -2613,13 +2907,38 @@ class FakeGhRuleOrder(unittest.TestCase):
                             self._index(adopt, "projectItems"),
                             "%s must be answerable separately" % marker)
 
-    def test_the_adopt_prefetch_comes_before_the_read_back(self):
-        """The pre-fetch's field list CONTAINS the read-back's as a substring,
-        so the order is what tells them apart."""
+    def test_the_adopt_dependency_reads_come_before_the_issue_read(self):
+        """`issues/200` is a substring of both dependency-list paths, so the
+        order is what tells them apart."""
         adopt = adopt_responses()
-        self.assertLess(
-            self._index(adopt, "--json state,body,parent,blockedBy,blocking"),
-            self._index(adopt, "--json parent,blockedBy,blocking"))
+        bare = self._index(adopt, "issues/%s" % ADOPT_NUM)
+        for path in ("dependencies/blocked_by?", "dependencies/blocking?"):
+            self.assertLess(
+                self._index(adopt, "issues/%s/%s" % (ADOPT_NUM, path)), bare)
+        self.assertLess(self._index(adopt, "item-add"), bare,
+                        "item-add's --url carries issues/200")
+
+    def test_no_rule_is_shadowed_by_an_earlier_one(self):
+        """A rule whose match CONTAINS an earlier rule's match can never be
+        reached: every argv it matches, the earlier one matched first. A
+        test leaning on it would pass on the wrong reply."""
+        for name, table in (("create", create_responses([], [])),
+                            ("adopt", adopt_responses())):
+            matches = [r["match"] for r in table]
+            for j, later in enumerate(matches):
+                for earlier in matches[:j]:
+                    self.assertNotIn(
+                        earlier, later,
+                        "%s table: %r is dead behind %r" % (name, later, earlier))
+
+    def test_every_write_reaches_the_post_rule_before_any_read_rule(self):
+        """`issues/55/sub_issues` also contains `issues/55`. The write rules
+        come first, so a write is never answered with an issue read."""
+        for table in (create_responses([], []), adopt_responses()):
+            post = self._index(table, "-X POST")
+            for i, rule in enumerate(table):
+                if rule["match"].startswith("issues/"):
+                    self.assertLess(post, i, rule["match"])
 
     def test_the_markers_the_script_emits_are_the_ones_the_fake_matches(self):
         text = FILE_ISSUE.read_text()
@@ -2654,7 +2973,7 @@ class ConfigValidation(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         out = r.stdout + r.stderr
         self.assertIn("zero shapes", out)
-        self.assertFalse(h.called("issue", "create", "--title"))
+        self.assertFalse(h.created())
 
     def test_a_shape_with_an_empty_labels_list_refuses_naming_the_shape(self):
         h = Harness("**Design:** none\n")
@@ -2666,7 +2985,7 @@ class ConfigValidation(unittest.TestCase):
         out = r.stdout + r.stderr
         self.assertIn("no labels", out)
         self.assertIn("work", out)
-        self.assertFalse(h.called("issue", "create", "--title"))
+        self.assertFalse(h.created())
 
     def test_a_shape_missing_the_labels_key_entirely_also_refuses(self):
         h = Harness("**Design:** none\n")
@@ -2683,7 +3002,7 @@ class ConfigValidation(unittest.TestCase):
                   *full_args(h.body_file), "--no-parent", "--top")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("--config", r.stdout + r.stderr)
-        self.assertFalse(h.called("issue", "create", "--title"))
+        self.assertFalse(h.created())
 
     def test_malformed_json_refuses_with_a_clear_error(self):
         h = Harness("**Design:** none\n")
@@ -2724,7 +3043,7 @@ class ConfigValidation(unittest.TestCase):
         self.assertIn("human_review_required", out)
         self.assertIn("agent", out)
         self.assertIn("true or false", out)
-        self.assertFalse(h.called("issue", "create", "--title"))
+        self.assertFalse(h.created())
 
     def test_human_review_required_non_boolean_values_refuse(self):
         # The string "true" is the one a value check (rather than a type
@@ -2736,7 +3055,7 @@ class ConfigValidation(unittest.TestCase):
                 r = h.run(*full_args(h.body_file), "--no-parent", "--top")
                 self.assertNotEqual(r.returncode, 0)
                 self.assertIn("human_review_required", r.stdout + r.stderr)
-                self.assertFalse(h.called("issue", "create", "--title"))
+                self.assertFalse(h.created())
 
 
 class PluckdConfig(unittest.TestCase):
@@ -2766,13 +3085,11 @@ class PluckdConfig(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         create_call = create_argv(h)
         self.assertIsNotNone(create_call)
-        self.assertIn("--repo", create_call)
-        self.assertEqual("jffriend/pluckd",
-                         create_call[create_call.index("--repo") + 1])
-        self.assertIn("bug", create_call)
+        self.assertEqual("repos/jffriend/pluckd/issues", create_call[3])
+        self.assertIn("labels[]=bug", create_call)
         # "needs-joe" is Photos-only vocabulary; it must not leak into a
         # config that never defined it.
-        self.assertNotIn("needs-joe", create_call)
+        self.assertNotIn("labels[]=needs-joe", create_call)
 
     def test_your_run_is_not_a_recognized_shape_under_pluckds_config(self):
         h = Harness("Some body.\n", config=PLUCKD_CONFIG)

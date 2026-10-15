@@ -69,7 +69,7 @@
 #   Adopt mode refuses rather than reconciles. If the issue is closed, sits
 #   under a different parent, or carries a blocked-by or blocks link this
 #   invocation did not name, it stops and prints the
-#   `gh issue edit --remove-*` command that clears each contradiction. It
+#   `gh api -X DELETE` command that clears each contradiction. It
 #   writes only the relationships that are not already there, and reads every
 #   one of them back regardless.
 #
@@ -368,9 +368,11 @@ else
 
   SHAPE_LABELS="$(jq -r --arg s "$SHAPE" '(.shapes // [])[] | select(.name == $s) | .labels[]' "$CONFIG")"
   [ -n "$SHAPE_LABELS" ] || die "ERROR: --shape must be one of: $SHAPE_NAMES (got: $SHAPE). Nothing was created."
-  LABELS=()
+  # The create is `gh api -X POST repos/{repo}/issues`, which takes labels as
+  # an array field: one `labels[]=` per label.
+  LABEL_FIELDS=()
   while IFS= read -r lbl; do
-    [ -n "$lbl" ] && LABELS+=(--label "$lbl")
+    [ -n "$lbl" ] && LABEL_FIELDS+=(-f "labels[]=$lbl")
   done <<<"$SHAPE_LABELS"
 fi
 
@@ -438,8 +440,9 @@ parse_list() {
   # WANTED set "122,122" while the server — which cannot hold the same link
   # twice — correctly read back "122". A CORRECTLY WIRED issue then failed its
   # own read-back and, in create mode, was told to delete itself. The same
-  # repeat would also have failed the whole `gh issue edit --add-blocked-by
-  # 122,122` call, the way any already-present link does. De-duplicating HERE
+  # repeat would also have written the link twice, and a second write of an
+  # already-present link is refused (it failed the whole `gh issue edit
+  # --add-blocked-by 122,122` call this script used to make). De-duplicating HERE
   # fixes the write side and the compare side together, which is the only way
   # the two stay in agreement.
   printf '%s\n' "$raw" | tr ',' '\n' | while read -r n; do
@@ -579,15 +582,24 @@ in_set() {
 FOUND_PARENT=""
 FOUND_BLOCKED=""
 FOUND_BLOCKING=""
+FOUND_BLOCKED_PAIRS=""   # "number:id" per blocker, for the remedies
+FOUND_BLOCKING_PAIRS=""
+SELF_ID=""               # the numeric REST id of the issue being wired
 
 if [ "$MODE" = adopt ]; then
-  ADOPT_JSON="$(gh issue view "$ADOPT" --repo "$REPO" --json state,body,parent,blockedBy,blocking 2>/dev/null)"
+  # Three REST reads: the issue, and the two dependency lists. Each reply is
+  # checked for its SHAPE, not its emptiness, because empty is a legal answer
+  # for all three -- no parent, no blockers, blocks nothing -- and a reply of
+  # the wrong shape extracts as exactly that.
+  ADOPT_JSON="$(gh_api "repos/$REPO/issues/$ADOPT")"
   if [ -z "$(printf '%s' "$ADOPT_JSON" | tr -d '[:space:]')" ] \
-     || [ "$(printf '%s' "$ADOPT_JSON" | jq -r 'has("state")' 2>/dev/null)" != "true" ]; then
+     || [ "$(printf '%s' "$ADOPT_JSON" | jq -r 'has("state") and has("number") and ((.id | type) == "number")' 2>/dev/null)" != "true" ]; then
     die "ERROR: --adopt $ADOPT — issue #$ADOPT could not be read from $REPO.
        Check that the number exists and that 'gh auth status' is healthy.
        $NOTHING"
   fi
+  # The numeric id the sub-issue and dependency endpoints take for #$ADOPT.
+  SELF_ID="$(printf '%s' "$ADOPT_JSON" | jq -r '.id')"
 
   ADOPT_STATE="$(printf '%s' "$ADOPT_JSON" | jq -r '.state // ""')"
   case "$ADOPT_STATE" in
@@ -601,11 +613,42 @@ if [ "$MODE" = adopt ]; then
   printf '%s' "$ADOPT_JSON" | jq -r '.body // ""' >"$ADOPT_BODY"
   parenting_rule "$ADOPT_BODY"
 
-  FOUND_PARENT="$(printf '%s' "$ADOPT_JSON" | jq -r '.parent.number // ""' | tr -d '[:space:]')"
-  FOUND_BLOCKED="$(printf '%s' "$ADOPT_JSON" | jq -r '[(.blockedBy.nodes // [])[].number] | sort | .[]' | tr '\n' ' ')"
-  FOUND_BLOCKING="$(printf '%s' "$ADOPT_JSON" | jq -r '[(.blocking.nodes // [])[].number] | sort | .[]' | tr '\n' ' ')"
-  FOUND_BLOCKED="$(printf '%s' "$FOUND_BLOCKED" | sed 's/ *$//')"
-  FOUND_BLOCKING="$(printf '%s' "$FOUND_BLOCKING" | sed 's/ *$//')"
+  # The parent is the number at the end of `parent_issue_url`. GitHub OMITS
+  # the key on a parentless issue (measured 2026-10-15), so absent or null is
+  # "no parent". Anything else that is not a URL ending in a number is a reply
+  # this cannot read, never "no parent".
+  FOUND_PARENT="$(printf '%s' "$ADOPT_JSON" | jq -r '
+    .parent_issue_url as $u
+    | if $u == null then ""
+      elif ($u | type) == "string" and ($u | test("/[0-9]+$")) then ($u | capture("/(?<n>[0-9]+)$").n)
+      else "BAD" end' 2>/dev/null)"
+  [ "$FOUND_PARENT" != "BAD" ] || die "ERROR: --adopt $ADOPT — the parent of #$ADOPT could not be read from $REPO.
+       The reply's parent_issue_url is not an issue URL. $NOTHING"
+
+  # Each list must be an ARRAY of issues carrying a number and an id. An
+  # object here -- an error reply -- would otherwise read as "no links".
+  # The ids are kept beside the numbers, as "number:id:owner/name": the
+  # remedies below name them. The lists carry issues from OTHER repos too
+  # (measured 2026-10-15: this repo's #14 blocks jffriend/pluckd#577), so each
+  # entry keeps the repo its `repository_url` names.
+  for dep in blocked_by blocking; do
+    dep_json="$(gh_api "repos/$REPO/issues/$ADOPT/dependencies/$dep?per_page=100")"
+    dep_rc=$?
+    dep_pairs="$(printf '%s' "$dep_json" | jq -r --arg repo "$REPO" '
+      if type == "array" and all(.[]; (.number | type) == "number" and (.id | type) == "number")
+      then (sort_by(.number) | .[]
+            | "\(.number):\(.id):\((.repository_url // "") | sub("^.*/repos/"; "") | if . == "" then $repo else . end)")
+      else "BAD" end' 2>/dev/null)" \
+      || dep_pairs="BAD"
+    if [ "$dep_rc" -ne 0 ] || [ -z "$dep_json" ] || [ "$dep_pairs" = "BAD" ]; then
+      die "ERROR: --adopt $ADOPT — the $( [ "$dep" = blocked_by ] && echo blocked-by || echo blocks ) links of #$ADOPT could not be read from $REPO.
+       $(tr '\n' ' ' <"$GH_API_ERR")
+       $NOTHING"
+    fi
+    if [ "$dep" = blocked_by ]; then FOUND_BLOCKED_PAIRS="$dep_pairs"; else FOUND_BLOCKING_PAIRS="$dep_pairs"; fi
+  done
+  FOUND_BLOCKED="$(printf '%s\n' "$FOUND_BLOCKED_PAIRS" | sed '/^$/d' | cut -d: -f1 | tr '\n' ' ' | sed 's/ *$//')"
+  FOUND_BLOCKING="$(printf '%s\n' "$FOUND_BLOCKING_PAIRS" | sed '/^$/d' | cut -d: -f1 | tr '\n' ' ' | sed 's/ *$//')"
 
   ASKED_BLOCKED="$(printf '%s' "$BLOCKED_LIST" | tr '\n' ' ' | sed 's/ *$//')"
   ASKED_BLOCKING="$(printf '%s' "$BLOCKS_LIST" | tr '\n' ' ' | sed 's/ *$//')"
@@ -624,12 +667,22 @@ if [ "$MODE" = adopt ]; then
        This refuses rather than reconciling: overwriting a parent would be
        invisible afterwards. Clear it, then re-run this command:
 
-         gh issue edit $ADOPT --repo $REPO --remove-parent"
+         gh api -X DELETE repos/$REPO/issues/$FOUND_PARENT/sub_issue -F sub_issue_id=$SELF_ID"
   fi
 
+  # Each remedy below is one REST delete per link, naming the numeric id the
+  # endpoint takes. A blocks link is the blocked issue's blocked-by link, so
+  # it is cleared against that issue, by #$ADOPT's own id.
   UNASKED_BLOCKED=""
-  for n in $FOUND_BLOCKED; do
-    in_set "$n" "$ASKED_BLOCKED" || UNASKED_BLOCKED="$UNASKED_BLOCKED $n"
+  CLEAR_BLOCKED=""
+  for pair in $FOUND_BLOCKED_PAIRS; do
+    n="${pair%%:*}"
+    in_set "$n" "$ASKED_BLOCKED" && continue
+    UNASKED_BLOCKED="$UNASKED_BLOCKED $n"
+    dep_id="${pair#*:}"
+    dep_id="${dep_id%%:*}"
+    CLEAR_BLOCKED="$CLEAR_BLOCKED
+         gh api -X DELETE repos/$REPO/issues/$ADOPT/dependencies/blocked_by/$dep_id"
   done
   UNASKED_BLOCKED="${UNASKED_BLOCKED# }"
   if [ -n "$UNASKED_BLOCKED" ]; then
@@ -640,13 +693,17 @@ if [ "$MODE" = adopt ]; then
        not named: [$UNASKED_BLOCKED]
 
        This refuses rather than reconciling. Clear them, then re-run:
-
-         gh issue edit $ADOPT --repo $REPO --remove-blocked-by $(printf '%s' "$UNASKED_BLOCKED" | tr ' ' ',')"
+$CLEAR_BLOCKED"
   fi
 
   UNASKED_BLOCKING=""
-  for n in $FOUND_BLOCKING; do
-    in_set "$n" "$ASKED_BLOCKING" || UNASKED_BLOCKING="$UNASKED_BLOCKING $n"
+  CLEAR_BLOCKING=""
+  for pair in $FOUND_BLOCKING_PAIRS; do
+    n="${pair%%:*}"
+    in_set "$n" "$ASKED_BLOCKING" && continue
+    UNASKED_BLOCKING="$UNASKED_BLOCKING $n"
+    CLEAR_BLOCKING="$CLEAR_BLOCKING
+         gh api -X DELETE repos/${pair##*:}/issues/$n/dependencies/blocked_by/$SELF_ID"
   done
   UNASKED_BLOCKING="${UNASKED_BLOCKING# }"
   if [ -n "$UNASKED_BLOCKING" ]; then
@@ -657,8 +714,7 @@ if [ "$MODE" = adopt ]; then
        not named: [$UNASKED_BLOCKING]
 
        This refuses rather than reconciling. Clear them, then re-run:
-
-         gh issue edit $ADOPT --repo $REPO --remove-blocking $(printf '%s' "$UNASKED_BLOCKING" | tr ' ' ',')"
+$CLEAR_BLOCKING"
   fi
 fi
 
@@ -711,11 +767,32 @@ if [ "$MODE" = create ]; then
   # that does not exist yet, so adopt mode skips it.
   TITLES_JSON="$(mktemp -t file_issue_titles.XXXXXX)"
   TITLES_LIMIT=500
-  gh issue list --repo "$REPO" --state open --limit "$TITLES_LIMIT" --json number,title >"$TITLES_JSON" 2>/dev/null \
-    || die "ERROR: could not list open issues to check for duplicates. Nothing was created."
+  # REST's open-issue listing, a page of 100 at a time, up to TITLES_LIMIT raw
+  # entries. The listing carries pull requests too, and a pull request is not
+  # an issue a new one could duplicate, so they are dropped below -- but only
+  # after counting, because they fill the same pages and a listing that hit
+  # the limit on them still left issues unread.
+  titles_raw=0
+  titles_page=1
+  titles_pages=""
+  while [ "$titles_raw" -lt "$TITLES_LIMIT" ]; do
+    page_json="$(gh_api "repos/$REPO/issues?state=open&per_page=100&page=$titles_page")" \
+      || die "ERROR: could not list open issues to check for duplicates ($(tr '\n' ' ' <"$GH_API_ERR")). Nothing was created."
+    # Fail closed on the shape: a reply that is not an array of issues would
+    # otherwise count as an empty page and end the listing as "no duplicates".
+    page_len="$(printf '%s' "$page_json" | jq -r 'if type == "array" then length else empty end' 2>/dev/null)"
+    [ -n "$page_len" ] || die "ERROR: the duplicate check failed, so this cannot say there are no duplicates.
+       The open-issue listing came back in an unrecognised shape. $NOTHING"
+    titles_pages="$titles_pages$page_json"
+    titles_raw=$(( titles_raw + page_len ))
+    [ "$page_len" -lt 100 ] && break
+    titles_page=$(( titles_page + 1 ))
+  done
+  printf '%s' "$titles_pages" \
+    | jq -s '[.[][] | select(has("pull_request") | not) | {number, title}]' >"$TITLES_JSON"
   # A full listing means there may be more open issues than were read, and a
   # match among those is missed. Say so; checking past the limit is #19.
-  if [ "$(jq length "$TITLES_JSON" 2>/dev/null)" = "$TITLES_LIMIT" ]; then
+  if [ "$titles_raw" -ge "$TITLES_LIMIT" ]; then
     echo "WARNING: the duplicate check read only the first $TITLES_LIMIT open issues."
     echo "         The repo may have more, and a duplicate among them would be missed."
     echo
@@ -810,13 +887,11 @@ if [ "$MODE" = create ] && [ -n "$DUPES" ] && [ "$FILE_ANYWAY" -eq 0 ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Apply. This is the ONE place the two modes legitimately differ: create folds
-# the relationships into the create call so no window exists in which the issue
-# exists unwired; adopt writes the ones that are not already there.
+# Apply. This is the ONE place the two modes legitimately differ: create
+# writes the issue and then every relationship asked for; adopt writes only
+# the ones that are not already there. Both write through write_links, one
+# REST call per link, and both leave the verdict to the shared read-back.
 # ---------------------------------------------------------------------------
-
-BLOCKED_CSV="$(csv_of "$BLOCKED_LIST")"
-BLOCKS_CSV="$(csv_of "$BLOCKS_LIST")"
 
 half_wired_head() {
   # The part every failure shares. Never leave the operator guessing what
@@ -840,8 +915,15 @@ reverify_command() {
   # The one command that re-runs every check on an issue that already exists,
   # and is SAFE on a correctly wired one: adopt mode writes only relationships
   # that are not already there, and reads all of them back. This is what makes
-  # a "could not look" refusal clearable instead of a dead end.
-  printf '  bash scripts/file_issue.sh --adopt %s %s %s --blocked-by %s --blocks %s\n' \
+  # a "could not look" refusal clearable instead of a dead end. It runs over
+  # REST, so it works where GraphQL is refused.
+  #
+  # The script and --config paths are the ones THIS run was given, so the
+  # command runs from wherever this one was run. It used to print
+  # `scripts/file_issue.sh` with no --config, which is neither this repo's
+  # layout nor a runnable command since --config became required.
+  printf '  bash %q --config %q --adopt %s %s %s --blocked-by %s --blocks %s\n' \
+    "${BASH_SOURCE[0]}" "$CONFIG" \
     "$NUM" \
     "$( [ -n "$PARENT" ] && printf -- '--parent %s' "$PARENT" || printf -- '--no-parent' )" \
     "$( [ "$TOP" -eq 1 ] && printf -- '--top' || printf -- '--after %s' "$AFTER" )" \
@@ -903,27 +985,102 @@ half_wired_unreadable() {
   exit 1
 }
 
-if [ "$MODE" = create ]; then
-  # One call. Parent and both blocking directions are set BY the create, so no
-  # window exists in which the issue exists unwired. A relationship answered
-  # `none` omits its flag entirely — never passes it empty.
-  CREATE_ARGS=(--repo "$REPO" --title "$TITLE" --body-file "$BODY_FILE" "${LABELS[@]}")
-  [ -n "$PARENT" ] && CREATE_ARGS+=(--parent "$PARENT")
-  [ -n "$BLOCKED_CSV" ] && CREATE_ARGS+=(--blocked-by "$BLOCKED_CSV")
-  [ -n "$BLOCKS_CSV" ] && CREATE_ARGS+=(--blocking "$BLOCKS_CSV")
+resolve_or_refuse() {
+  # $1 the flag that named the issue, $2 its number. Sets RESOLVED_ID to the
+  # issue's numeric id, or refuses: every link write needs an id, and a number
+  # that does not resolve is refused BEFORE anything is written. The single
+  # `gh issue create` this replaced failed atomically on a missing number;
+  # REST create is several calls, and a typo found after the first would
+  # leave a real issue half-wired. Called in the CURRENT SHELL, so its die
+  # reaches the shell running the script.
+  local id rc
+  id="$(issue_numeric_id "$2")"
+  rc=$?
+  case "$rc" in
+    0) RESOLVED_ID="$id" ;;
+    2) die "ERROR: $1 $2 — issue #$2 does not exist in $REPO. $NOTHING" ;;
+    *) die "ERROR: $1 $2 — issue #$2 could not be read from $REPO, so its id is unknown.
+       $(tr '\n' ' ' <"$GH_API_ERR")
+       $NOTHING" ;;
+  esac
+}
 
-  URL="$(gh issue create "${CREATE_ARGS[@]}" | tail -1 | tr -d '[:space:]')"
-  [ -n "$URL" ] || die "ERROR: gh issue create produced no issue URL. Nothing to read back."
-  NUM="${URL##*/}"
-  case "$NUM" in *[!0-9]*) die "ERROR: could not read an issue number out of: $URL" ;; esac
+LINK_WRITE_FAILED=0
+post_link() {
+  # $1 what the link is, for the warning; the rest are `gh api` arguments.
+  # A failed write is a WARNING, not fatal, and NOT evidence that nothing
+  # landed: a call can fail after the server applied it, so the read-back is
+  # what establishes the true state.
+  local what="$1"
+  shift
+  if ! gh_api -X POST "$@" >/dev/null; then
+    LINK_WRITE_FAILED=1
+    echo "WARNING: writing $what for #$NUM exited non-zero: $(tr '\n' ' ' <"$GH_API_ERR")" >&2
+  fi
+}
+
+write_links() {
+  # $1 the parent to put #$NUM under, or empty. $2 its blockers, as
+  # "number:id" pairs. $3 the issues it blocks, as numbers. Each link is its
+  # own REST call. A blocks link is the OTHER issue's blocked-by link, so it
+  # is written against that issue, carrying #$NUM's own id. An empty answer
+  # writes nothing -- never an empty link.
+  local pair n
+  [ -n "$1" ] && post_link "parent #$1" "repos/$REPO/issues/$1/sub_issues" -F sub_issue_id="$SELF_ID"
+  for pair in $2; do
+    post_link "blocked-by #${pair%%:*}" "repos/$REPO/issues/$NUM/dependencies/blocked_by" -F issue_id="${pair#*:}"
+  done
+  for n in $3; do
+    post_link "blocks #$n" "repos/$REPO/issues/$n/dependencies/blocked_by" -F issue_id="$SELF_ID"
+  done
+  if [ "$LINK_WRITE_FAILED" -eq 1 ]; then
+    echo "         Links whose write failed MAY still have been written." >&2
+    echo "         The read-back below reports each one separately." >&2
+  fi
+}
+
+RESOLVED_ID=""
+if [ "$MODE" = create ]; then
+  # Resolve every referenced issue first (#14 KTD3). The parent and each
+  # blocked issue are read only to prove they exist; each blocker's id is
+  # what its link write takes.
+  [ -n "$PARENT" ] && resolve_or_refuse --parent "$PARENT"
+  CREATE_BLOCKER_PAIRS=""
+  for n in $BLOCKED_LIST; do
+    resolve_or_refuse --blocked-by "$n"
+    CREATE_BLOCKER_PAIRS="$CREATE_BLOCKER_PAIRS $n:$RESOLVED_ID"
+  done
+  for n in $BLOCKS_LIST; do
+    resolve_or_refuse --blocks "$n"
+  done
+
+  # The issue first, then each link, then the read-back judges (#14 KTD4).
+  # The window in which the issue exists partly linked is accepted: a failed
+  # link write warns and carries on, and the refusal the read-back picks names
+  # the adopt command that writes only what is missing.
+  CREATE_REPLY="$(gh_api -X POST "repos/$REPO/issues" -f title="$TITLE" -F body=@"$BODY_FILE" "${LABEL_FIELDS[@]}")" \
+    || die "ERROR: the issue create failed: $(tr '\n' ' ' <"$GH_API_ERR")
+       Nothing to read back."
+  NUM="$(printf '%s' "$CREATE_REPLY" | jq -r '.number // ""' 2>/dev/null)"
+  URL="$(printf '%s' "$CREATE_REPLY" | jq -r '.html_url // ""' 2>/dev/null)"
+  SELF_ID="$(printf '%s' "$CREATE_REPLY" | jq -r '.id // ""' 2>/dev/null)"
+  case "$NUM" in ''|*[!0-9]*) die "ERROR: could not read an issue number out of the create reply: $CREATE_REPLY" ;; esac
+  case "$SELF_ID" in ''|*[!0-9]*) die "ERROR: could not read the id of #$NUM out of the create reply: $CREATE_REPLY" ;; esac
+  [ -n "$URL" ] || die "ERROR: could not read the URL of #$NUM out of the create reply: $CREATE_REPLY"
   HALF_WIRED_PROVENANCE="It is left HALF-WIRED — the create succeeded and this relationship did not."
-  HALF_WIRED_NEXT="Finish it by hand, or delete #$NUM and re-run. Do not assume it is fine."
+  # Leads with the adopt command: it writes only the links that are missing,
+  # reads every one back, and runs over REST. Deleting an issue needs GraphQL,
+  # so delete-and-re-run is offered only as a local-session alternative.
+  HALF_WIRED_NEXT="Finish it with this command. It writes only the links that are missing, reads every one back, and needs no GraphQL:
+$(reverify_command)
+In a local session you may instead delete #$NUM and re-run. Do not assume it is fine."
   echo "created #$NUM  $URL"
+  write_links "$PARENT" "$CREATE_BLOCKER_PAIRS" "$BLOCKS_LIST"
 else
   NUM="$ADOPT"
   URL="https://github.com/$REPO/issues/$NUM"
   HALF_WIRED_PROVENANCE="It is left PARTLY WIRED — relationships this run wrote may have landed, and this one did not agree."
-  HALF_WIRED_NEXT="Finish it by hand with gh issue edit, then re-run this command. Do not delete #$NUM — nothing here proved its wiring wrong."
+  HALF_WIRED_NEXT="Finish it by hand, then re-run this command. Do not delete #$NUM — nothing here proved its wiring wrong."
 
   # A DELTA, not a set. `gh issue edit` is NOT idempotent on either kind of
   # relationship — measured against the live board on 2026-08-24 with gh
@@ -934,39 +1091,34 @@ else
   #   gh issue edit 234 --parent 240         -> Issue may not contain duplicate
   #        sub-issues (addSubIssue), exit 1
   # The pre-existing link survived both, so it is a refusal, not corruption.
-  # A flag is therefore passed ONLY for a relationship that is NOT already
-  # there. A contradicting one has already been refused above; an already
-  # matching one is skipped. If the delta is empty no edit is issued at all —
-  # and the read-back still runs, because it is the only proof anything holds.
-  EDIT_ARGS=()
-  [ -n "$PARENT" ] && [ "$PARENT" != "$FOUND_PARENT" ] && EDIT_ARGS+=(--parent "$PARENT")
+  # The REST writes that replaced it (#14) carry one link each, so a repeat
+  # can cost only its own call -- but REST is assumed to refuse a repeat the
+  # same way, not measured, so the delta stands. A link is written ONLY when
+  # it is NOT already there. A contradicting one has already been refused
+  # above; an already matching one is skipped. If the delta is empty nothing
+  # is written at all — and the read-back still runs, because it is the only
+  # proof anything holds.
+  ADD_PARENT=""
+  [ -n "$PARENT" ] && [ "$PARENT" != "$FOUND_PARENT" ] && ADD_PARENT="$PARENT"
 
-  ADD_BLOCKED=""
+  # Each missing blocker's id is resolved before any write, as create does.
+  ADD_BLOCKED_PAIRS=""
   for n in $ASKED_BLOCKED; do
-    in_set "$n" "$FOUND_BLOCKED" || ADD_BLOCKED="$ADD_BLOCKED,$n"
+    in_set "$n" "$FOUND_BLOCKED" && continue
+    resolve_or_refuse --blocked-by "$n"
+    ADD_BLOCKED_PAIRS="$ADD_BLOCKED_PAIRS $n:$RESOLVED_ID"
   done
-  ADD_BLOCKED="${ADD_BLOCKED#,}"
-  [ -n "$ADD_BLOCKED" ] && EDIT_ARGS+=(--add-blocked-by "$ADD_BLOCKED")
 
   ADD_BLOCKING=""
   for n in $ASKED_BLOCKING; do
-    in_set "$n" "$FOUND_BLOCKING" || ADD_BLOCKING="$ADD_BLOCKING,$n"
+    in_set "$n" "$FOUND_BLOCKING" || ADD_BLOCKING="$ADD_BLOCKING $n"
   done
-  ADD_BLOCKING="${ADD_BLOCKING#,}"
-  [ -n "$ADD_BLOCKING" ] && EDIT_ARGS+=(--add-blocking "$ADD_BLOCKING")
 
-  if [ "${#EDIT_ARGS[@]}" -eq 0 ]; then
-    echo "relationships     every one asked for is already there; no edit issued"
+  if [ -z "$ADD_PARENT$ADD_BLOCKED_PAIRS$ADD_BLOCKING" ]; then
+    echo "relationships     every one asked for is already there; no write issued"
     echo "                  (the read-back below is the only proof of that)"
   else
-    if ! gh issue edit "$NUM" --repo "$REPO" "${EDIT_ARGS[@]}" >/dev/null; then
-      # NOT fatal here, and NOT evidence that nothing landed. One rejected flag
-      # fails the whole call server-side while the others may already have been
-      # applied, so the read-back below is what establishes the true state.
-      echo "WARNING: gh issue edit exited non-zero for #$NUM." >&2
-      echo "         Relationships it carried MAY still have been written." >&2
-      echo "         The read-back below reports each one separately." >&2
-    fi
+    write_links "$ADD_PARENT" "$ADD_BLOCKED_PAIRS" "$ADD_BLOCKING"
   fi
   echo "wiring #$NUM  $URL"
 fi
