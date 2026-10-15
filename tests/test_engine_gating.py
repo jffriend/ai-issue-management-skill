@@ -495,7 +495,7 @@ class PhotosConfigShapes(unittest.TestCase):
         r = h.run(
             "--title", title, "--body-file", str(h.body_file),
             "--shape", shape, "--no-parent", "--top",
-            "--blocked-by", "none", "--blocks", "none", stdin="y\n",
+            "--blocked-by", "none", "--blocks", "none",
         )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         create_call = create_argv(h)
@@ -581,17 +581,6 @@ class NeighbourCheck(unittest.TestCase):
         self.assertIn("board", (r.stdout + r.stderr).lower())
         self.assertFalse(h.called("issue", "create", "--title"))
 
-    def test_answering_no_at_the_prompt_creates_nothing(self):
-        h = Harness("**Design:** none\n")
-        r = h.run(*full_args(h.body_file), "--no-parent", "--top", stdin="n\n")
-        self.assertNotEqual(r.returncode, 0)
-        self.assertFalse(h.called("issue", "create", "--title"))
-
-    def test_an_empty_answer_at_the_prompt_creates_nothing(self):
-        h = Harness("**Design:** none\n")
-        r = h.run(*full_args(h.body_file), "--no-parent", "--top", stdin="\n")
-        self.assertNotEqual(r.returncode, 0)
-        self.assertFalse(h.called("issue", "create", "--title"))
 
 
 NEW_URL = "https://github.com/jffriend/photo-consolidation/issues/200\n"
@@ -638,6 +627,84 @@ def create_responses(blocked_by, blocking, parent=None, corroborate=""):
     ]
 
 
+DUPE_TITLE = "Re-sort the library into YYYY/MM folders"
+DUPE_PRE_BOARD = PRE_BOARD + [
+    (164, "Run: re-sort the library into YYYY/MM once the dates are final"),
+]
+DUPE_POST_BOARD = [
+    (101, "First thing on the board"),
+    (200, DUPE_TITLE),
+    (102, "Second thing"),
+    (103, "Third thing"),
+    (164, "Run: re-sort the library into YYYY/MM once the dates are final"),
+]
+
+
+class NoPromptOneRun(unittest.TestCase):
+    """
+    The engine never asks for confirmation. A create run with no possible
+    duplicates writes in one run; one with possible duplicates stops before
+    writing, with exit code 3, unless --file-anyway is given.
+    """
+
+    def _harness(self, pre=PRE_BOARD, post=None):
+        post = post or [
+            (101, "First thing on the board"),
+            (200, "A brand new distinct piece of work"),
+            (102, "Second thing"),
+            (103, "Third thing"),
+        ]
+        return Harness("**Design:** none\n", boards=[pre, post],
+                       responses=create_responses([], []))
+
+    def test_no_matches_files_in_one_run_without_stdin(self):
+        # Covers AE1.
+        h = self._harness()
+        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("POSSIBLE DUPLICATES: none found", r.stdout)
+        self.assertIn("READ-BACK", r.stdout)
+        self.assertTrue(h.called("issue", "create", "--title"))
+
+    def test_stdin_is_ignored(self):
+        # An `n` that the old prompt would have read as "no" changes nothing.
+        h = self._harness()
+        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101",
+                  stdin="n\n")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(h.called("issue", "create", "--title"))
+
+    def test_possible_duplicates_stop_before_any_write_with_exit_3(self):
+        h = self._harness(DUPE_PRE_BOARD, DUPE_POST_BOARD)
+        r = h.run(*full_args(h.body_file, **{"--title": DUPE_TITLE}),
+                  "--no-parent", "--after", "101")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("POSSIBLE DUPLICATES", r.stdout)
+        self.assertIn("164", r.stdout)
+        self.assertIn("ABOUT TO CREATE", r.stdout)
+        self.assertIn("Nothing was created", r.stderr)
+        self.assertIn("--file-anyway", r.stderr)
+        self.assertFalse(h.called("issue", "create", "--title"))
+        self.assertFalse(h.called("item-add"))
+
+    def test_file_anyway_files_past_possible_duplicates(self):
+        h = self._harness(DUPE_PRE_BOARD, DUPE_POST_BOARD)
+        r = h.run(*full_args(h.body_file, **{"--title": DUPE_TITLE}),
+                  "--no-parent", "--after", "101", "--file-anyway")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("164", r.stdout)
+        self.assertIn("READ-BACK", r.stdout)
+        self.assertTrue(h.called("issue", "create", "--title"))
+
+    def test_dry_run_with_possible_duplicates_exits_0_and_writes_nothing(self):
+        h = self._harness(DUPE_PRE_BOARD, DUPE_POST_BOARD)
+        r = h.run(*full_args(h.body_file, **{"--title": DUPE_TITLE}),
+                  "--no-parent", "--after", "101", "--dry-run")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("164", r.stdout)
+        self.assertFalse(h.called("issue", "create", "--title"))
+
+
 class ReadBack(unittest.TestCase):
     """
     Never report success from an exit code. Every relationship is read back and
@@ -660,7 +727,7 @@ class ReadBack(unittest.TestCase):
 
     def test_happy_path_all_relationships_match(self):
         h = self._harness()
-        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101", stdin="y\n")
+        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertTrue(h.called("issue", "create", "--title"))
 
@@ -676,7 +743,6 @@ class ReadBack(unittest.TestCase):
             "--body-file", str(h.body_file), "--shape", "work",
             "--parent", "55", "--after", "101",
             "--blocked-by", "122", "--blocks", "63",
-            stdin="y\n",
         )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         out = r.stdout
@@ -694,7 +760,6 @@ class ReadBack(unittest.TestCase):
             "--body-file", str(h.body_file), "--shape", "work",
             "--no-parent", "--after", "101",
             "--blocked-by", "122", "--blocks", "none",
-            stdin="y\n",
         )
         self.assertNotEqual(r.returncode, 0)
         out = r.stdout + r.stderr
@@ -708,7 +773,6 @@ class ReadBack(unittest.TestCase):
             "--body-file", str(h.body_file), "--shape", "work",
             "--no-parent", "--after", "101",
             "--blocked-by", "none", "--blocks", "63",
-            stdin="y\n",
         )
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("blocks", (r.stdout + r.stderr).lower())
@@ -720,7 +784,6 @@ class ReadBack(unittest.TestCase):
             "--body-file", str(h.body_file), "--shape", "work",
             "--parent", "55", "--after", "101",
             "--blocked-by", "none", "--blocks", "none",
-            stdin="y\n",
         )
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("parent", (r.stdout + r.stderr).lower())
@@ -733,7 +796,7 @@ class ReadBack(unittest.TestCase):
             (200, "A brand new distinct piece of work"),
         ]
         h = self._harness(board_after=wrong)
-        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101", stdin="y\n")
+        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("position", (r.stdout + r.stderr).lower())
 
@@ -758,7 +821,7 @@ class ReadBack(unittest.TestCase):
             ]],
             responses=responses,
         )
-        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101", stdin="y\n")
+        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         positions = [c for c in h.calls()
                      if any("updateProjectV2ItemPosition" in a for a in c)]
@@ -768,7 +831,7 @@ class ReadBack(unittest.TestCase):
 
     def test_missing_from_the_board_fails_loudly(self):
         h = self._harness(board_after=PRE_BOARD)
-        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101", stdin="y\n")
+        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("board", (r.stdout + r.stderr).lower())
 
@@ -933,7 +996,6 @@ class NativeWritePath(unittest.TestCase):
             "--body-file", str(h.body_file), "--shape", "work",
             "--parent", "55", "--after", "101",
             "--blocked-by", "122", "--blocks", "63",
-            stdin="y\n",
         )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         argv = self._create_argv(h)
@@ -958,8 +1020,7 @@ class NativeWritePath(unittest.TestCase):
             boards=[PRE_BOARD, board_after],
             responses=create_responses([], [], None),
         )
-        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101",
-                  stdin="y\n")
+        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         argv = self._create_argv(h)
         self.assertIsNotNone(argv)
@@ -984,7 +1045,6 @@ class NativeWritePath(unittest.TestCase):
             "--body-file", str(h.body_file), "--shape", "work",
             "--parent", "55", "--after", "101",
             "--blocked-by", "122", "--blocks", "63",
-            stdin="y\n",
         )
         for call in h.calls():
             joined = " ".join(call)
@@ -1008,7 +1068,6 @@ class NativeWritePath(unittest.TestCase):
             "--body-file", str(h.body_file), "--shape", "work",
             "--parent", "55", "--after", "101",
             "--blocked-by", "122", "--blocks", "63",
-            stdin="y\n",
         )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         views = [c for c in h.calls()
@@ -1203,14 +1262,14 @@ class AdoptGate(unittest.TestCase):
 
     def test_a_nonexistent_issue_refuses_before_any_write(self):
         h = adopt_harness(view_stdout="", view_exit=1)
-        r = h.run(*adopt_args(num="999"), "--no-parent", "--top", stdin="y\n")
+        r = h.run(*adopt_args(num="999"), "--no-parent", "--top")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("999", r.stdout + r.stderr)
         self.assertTrue(wrote_nothing(h))
 
     def test_a_closed_issue_refuses_before_any_write(self):
         h = adopt_harness(state="CLOSED")
-        r = h.run(*adopt_args(), "--no-parent", "--top", stdin="y\n")
+        r = h.run(*adopt_args(), "--no-parent", "--top")
         self.assertNotEqual(r.returncode, 0)
         out = r.stdout + r.stderr
         self.assertIn("CLOSED", out)
@@ -1218,7 +1277,7 @@ class AdoptGate(unittest.TestCase):
 
     def test_a_plan_derived_adopted_body_refuses_no_parent(self):
         h = adopt_harness(body="Some body.\n\n" + PLAN_DESIGN + "\n")
-        r = h.run(*adopt_args(), "--no-parent", "--top", stdin="y\n")
+        r = h.run(*adopt_args(), "--no-parent", "--top")
         self.assertNotEqual(r.returncode, 0)
         out = r.stdout + r.stderr
         self.assertIn("--parent", out)
@@ -1234,14 +1293,13 @@ class AdoptGate(unittest.TestCase):
         self.assertIn("Nothing was changed", r.stdout)
         self.assertTrue(wrote_nothing(h))
 
-    def test_anything_but_yes_at_the_prompt_writes_nothing(self):
-        for answer in ("n\n", "\n"):
-            with self.subTest(answer=answer):
-                h = adopt_harness()
-                r = h.run(*adopt_args(), "--no-parent", "--after", "101",
-                          stdin=answer)
-                self.assertNotEqual(r.returncode, 0)
-                self.assertTrue(wrote_nothing(h))
+    def test_file_anyway_is_refused_in_adopt_mode(self):
+        # Adopt has no duplicate check, so there is nothing to wave past.
+        h = adopt_harness()
+        r = h.run(*adopt_args(), "--no-parent", "--after", "101", "--file-anyway")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("--file-anyway", r.stdout + r.stderr)
+        self.assertTrue(wrote_nothing(h))
 
     def test_a_gh_whose_issue_edit_lacks_the_flags_refuses_the_adopt(self):
         h = Harness("**Design:** none\n",
@@ -1267,7 +1325,7 @@ class AdoptContradiction(unittest.TestCase):
 
     def test_an_existing_different_parent_refuses_and_names_the_clearing_command(self):
         h = adopt_harness(pre_parent="77")
-        r = h.run(*adopt_args(), "--parent", "55", "--after", "101", stdin="y\n")
+        r = h.run(*adopt_args(), "--parent", "55", "--after", "101")
         self.assertNotEqual(r.returncode, 0)
         out = r.stdout + r.stderr
         self.assertIn("77", out, "must name what it found")
@@ -1278,7 +1336,7 @@ class AdoptContradiction(unittest.TestCase):
 
     def test_an_existing_parent_under_no_parent_refuses_the_same_way(self):
         h = adopt_harness(pre_parent="77")
-        r = h.run(*adopt_args(), "--no-parent", "--after", "101", stdin="y\n")
+        r = h.run(*adopt_args(), "--no-parent", "--after", "101")
         self.assertNotEqual(r.returncode, 0)
         out = r.stdout + r.stderr
         self.assertIn("77", out)
@@ -1288,7 +1346,7 @@ class AdoptContradiction(unittest.TestCase):
     def test_unnamed_blocked_by_links_refuse_and_name_the_clearing_command(self):
         h = adopt_harness(pre_blocked=[122, 133])
         r = h.run(*adopt_args(**{"--blocked-by": "122"}), "--no-parent",
-                  "--after", "101", stdin="y\n")
+                  "--after", "101")
         self.assertNotEqual(r.returncode, 0)
         out = r.stdout + r.stderr
         self.assertIn("133", out, "must name the link not asked for")
@@ -1298,7 +1356,7 @@ class AdoptContradiction(unittest.TestCase):
 
     def test_unnamed_blocks_links_refuse_and_name_the_clearing_command(self):
         h = adopt_harness(pre_blocking=[63])
-        r = h.run(*adopt_args(), "--no-parent", "--after", "101", stdin="y\n")
+        r = h.run(*adopt_args(), "--no-parent", "--after", "101")
         self.assertNotEqual(r.returncode, 0)
         out = r.stdout + r.stderr
         self.assertIn("63", out)
@@ -1324,7 +1382,7 @@ class AdoptDelta(unittest.TestCase):
 
     def test_an_already_correct_parent_is_not_sent_again(self):
         h = adopt_harness(pre_parent="55", post_parent="55")
-        r = h.run(*adopt_args(), "--parent", "55", "--after", "101", stdin="y\n")
+        r = h.run(*adopt_args(), "--parent", "55", "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         argv = edit_argv(h)
         if argv is not None:
@@ -1334,7 +1392,7 @@ class AdoptDelta(unittest.TestCase):
     def test_an_already_present_blocker_is_omitted_and_the_others_are_sent(self):
         h = adopt_harness(pre_blocked=[122], post_blocked=[122, 133])
         r = h.run(*adopt_args(**{"--blocked-by": "122,133"}), "--no-parent",
-                  "--after", "101", stdin="y\n")
+                  "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         argv = edit_argv(h)
         self.assertIsNotNone(argv, "the missing blocker still has to be written")
@@ -1351,7 +1409,7 @@ class AdoptDelta(unittest.TestCase):
         """
         h = adopt_harness(pre_blocking=[63], post_blocking=[63, 70])
         r = h.run(*adopt_args(**{"--blocks": "63,70"}), "--no-parent",
-                  "--after", "101", stdin="y\n")
+                  "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         argv = edit_argv(h)
         self.assertIsNotNone(argv, "the missing blocking link still has to be written")
@@ -1372,7 +1430,7 @@ class AdoptDelta(unittest.TestCase):
         in the delta logic.
         """
         h = adopt_harness(boards=[ADOPT_PRE_BOARD, ADOPT_PRE_BOARD])
-        r = h.run(*adopt_args(), "--no-parent", "--after", "102", stdin="y\n")
+        r = h.run(*adopt_args(), "--no-parent", "--after", "102")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         positions = [c for c in h.calls()
                      if any("updateProjectV2ItemPosition" in a for a in c)]
@@ -1383,7 +1441,7 @@ class AdoptDelta(unittest.TestCase):
         h = adopt_harness(pre_parent="55", pre_blocked=[122], pre_blocking=[63],
                           post_parent="55", post_blocked=[122], post_blocking=[63])
         r = h.run("--adopt", ADOPT_NUM, "--parent", "55", "--after", "101",
-                  "--blocked-by", "122", "--blocks", "63", stdin="y\n")
+                  "--blocked-by", "122", "--blocks", "63")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIsNone(edit_argv(h),
                           "an empty delta must issue no gh issue edit at all")
@@ -1400,7 +1458,7 @@ class AdoptDelta(unittest.TestCase):
         # exited non-zero" is not evidence that nothing was written.
         h = adopt_harness(post_parent="55", post_blocked=[], edit_exit=1)
         r = h.run("--adopt", ADOPT_NUM, "--parent", "55", "--after", "101",
-                  "--blocked-by", "122", "--blocks", "none", stdin="y\n")
+                  "--blocked-by", "122", "--blocks", "none")
         self.assertNotEqual(r.returncode, 0)
         out = r.stdout + r.stderr
         self.assertIn("blocked-by", out, "must name the relationship that disagreed")
@@ -1415,7 +1473,7 @@ class AdoptReadBack(unittest.TestCase):
     def test_happy_path_all_five_relationships_match(self):
         h = adopt_harness(post_parent="55", post_blocked=[122], post_blocking=[63])
         r = h.run("--adopt", ADOPT_NUM, "--parent", "55", "--after", "101",
-                  "--blocked-by", "122", "--blocks", "63", stdin="y\n")
+                  "--blocked-by", "122", "--blocks", "63")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         out = r.stdout
         self.assertIn("board membership   ok", out)
@@ -1428,7 +1486,7 @@ class AdoptReadBack(unittest.TestCase):
     def test_a_blocker_that_does_not_land_fails_without_advising_deletion(self):
         h = adopt_harness(post_blocked=[])
         r = h.run("--adopt", ADOPT_NUM, "--no-parent", "--after", "101",
-                  "--blocked-by", "122", "--blocks", "none", stdin="y\n")
+                  "--blocked-by", "122", "--blocks", "none")
         self.assertNotEqual(r.returncode, 0)
         out = r.stdout + r.stderr
         self.assertIn("blocked-by", out)
@@ -1439,7 +1497,7 @@ class AdoptReadBack(unittest.TestCase):
     def test_a_parent_that_does_not_land_fails_naming_parent(self):
         h = adopt_harness(post_parent=None)
         r = h.run("--adopt", ADOPT_NUM, "--parent", "55", "--after", "101",
-                  "--blocked-by", "none", "--blocks", "none", stdin="y\n")
+                  "--blocked-by", "none", "--blocks", "none")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("parent", (r.stdout + r.stderr).lower())
 
@@ -1448,7 +1506,7 @@ class AdoptReadBack(unittest.TestCase):
         # item-add's output and refuses when it is empty, which for an issue
         # already on the board would abort a correctly wired filing.
         h = adopt_harness()
-        r = h.run(*adopt_args(), "--no-parent", "--after", "101", stdin="y\n")
+        r = h.run(*adopt_args(), "--no-parent", "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertFalse(h.called("item-add"),
                          "the id came from the by-number lookup, not item-add")
@@ -1468,7 +1526,7 @@ class AdoptReadBack(unittest.TestCase):
         ]
         h = adopt_harness(boards=[ADOPT_PRE_BOARD, top_board],
                           item_by_number="")
-        r = h.run(*adopt_args(), "--no-parent", "--top", stdin="y\n")
+        r = h.run(*adopt_args(), "--no-parent", "--top")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertTrue(h.called("item-add"))
         self.assertIn("board position     ok (top)", r.stdout)
@@ -1476,7 +1534,7 @@ class AdoptReadBack(unittest.TestCase):
     def test_an_adopt_failure_never_says_a_create_happened(self):
         h = adopt_harness(post_blocked=[])
         r = h.run("--adopt", ADOPT_NUM, "--no-parent", "--after", "101",
-                  "--blocked-by", "122", "--blocks", "none", stdin="y\n")
+                  "--blocked-by", "122", "--blocks", "none")
         out = r.stdout + r.stderr
         self.assertNotIn("the create succeeded", out)
         self.assertNotIn("created #", out)
@@ -1671,7 +1729,7 @@ class BehaviouralEquivalence(unittest.TestCase):
                     responses=create_responses(blocked, blocking, parent))
         return h.run("--title", "A brand new distinct piece of work",
                      "--body-file", str(h.body_file), "--shape", "work",
-                     *args, stdin="y\n")
+                     *args)
 
     def _adopt(self, board_after, parent, blocked, blocking, args):
         h = Harness("**Design:** none\n",
@@ -1679,7 +1737,7 @@ class BehaviouralEquivalence(unittest.TestCase):
                     responses=adopt_responses(post_parent=parent,
                                               post_blocked=blocked,
                                               post_blocking=blocking))
-        return h.run("--adopt", ADOPT_NUM, *args, stdin="y\n")
+        return h.run("--adopt", ADOPT_NUM, *args)
 
     def _compare(self, create_r, adopt_r):
         self.assertNotEqual(create_r.returncode, 0, create_r.stdout)
@@ -1784,7 +1842,7 @@ class WriteShapeParity(unittest.TestCase):
                     responses=create_responses(blocked, blocking, parent))
         r = h.run("--title", "A brand new distinct piece of work",
                   "--body-file", str(h.body_file), "--shape", "work",
-                  *args, stdin="y\n")
+                  *args)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         argv = create_argv(h)
         self.assertIsNotNone(argv)
@@ -1793,7 +1851,7 @@ class WriteShapeParity(unittest.TestCase):
     def _adopt_set(self, args, blocked, blocking, parent):
         h = adopt_harness(post_parent=parent, post_blocked=blocked,
                           post_blocking=blocking)
-        r = h.run("--adopt", ADOPT_NUM, *args, stdin="y\n")
+        r = h.run("--adopt", ADOPT_NUM, *args)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         argv = edit_argv(h)
         return relationship_set(argv) if argv else set()
@@ -1878,7 +1936,7 @@ class ReadBackRetry(unittest.TestCase):
                                        parent, corroborate=corroborate),
         )
         args = args or ["--no-parent", "--after", "101"]
-        return h, h.run(*full_args(h.body_file), *args, stdin="y\n", env=env)
+        return h, h.run(*full_args(h.body_file), *args, env=env)
 
     @staticmethod
     def _board_reads(h):
@@ -1939,8 +1997,7 @@ class ReadBackRetry(unittest.TestCase):
                     boards=[PRE_BOARD, BOARD_WITHOUT_200],
                     board_exits=[0, 1],
                     responses=create_responses([], []))
-        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101",
-                  stdin="y\n")
+        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
         self.assertNotEqual(r.returncode, 0)
         out = r.stdout + r.stderr
         self.assertIn("The READ failed, not the write.", out)
@@ -2100,7 +2157,7 @@ class ReadBackRetry(unittest.TestCase):
         board_without = [(101, "First thing on the board"), (102, "Second thing")]
         h = adopt_harness(boards=[ADOPT_PRE_BOARD, board_without,
                                   ADOPT_POST_BOARD])
-        r = h.run(*adopt_args(), "--no-parent", "--after", "101", stdin="y\n")
+        r = h.run(*adopt_args(), "--no-parent", "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("attempt 2", r.stdout)
         self.assertIn("board position     ok (after #101)", r.stdout)
@@ -2108,7 +2165,7 @@ class ReadBackRetry(unittest.TestCase):
     def test_an_adopt_that_never_appears_never_says_delete_either(self):
         board_without = [(101, "First thing on the board"), (102, "Second thing")]
         h = adopt_harness(boards=[ADOPT_PRE_BOARD, board_without])
-        r = h.run(*adopt_args(), "--no-parent", "--after", "101", stdin="y\n")
+        r = h.run(*adopt_args(), "--no-parent", "--after", "101")
         self.assertNotEqual(r.returncode, 0)
         out = r.stdout + r.stderr
         self.assertIn("not on the board", out)
@@ -2177,8 +2234,7 @@ class ReadBackProvesSomething(unittest.TestCase):
                                "--json parent,blockedBy,blocking",
                                stdout=json.dumps({"message": "Not Found"})),
         )
-        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101",
-                  stdin="y\n")
+        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
         out = r.stdout + r.stderr
         self.assertNotEqual(r.returncode, 0, out)
         self.assertIn("unrecognised shape", out)
@@ -2195,8 +2251,7 @@ class ReadBackProvesSomething(unittest.TestCase):
                                "--json parent,blockedBy,blocking",
                                stdout="", exit=1),
         )
-        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101",
-                  stdin="y\n")
+        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
         out = r.stdout + r.stderr
         self.assertNotEqual(r.returncode, 0, out)
         self.assertIn("The READ failed, not the write.", out)
@@ -2263,8 +2318,7 @@ class PositionProofIsLatched(unittest.TestCase):
             boards=[PRE_BOARD, BOARD_200_WRONG_POS, BOARD_WITHOUT_200],
             responses=create_responses([], [], corroborate="PVTI_new"),
         )
-        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101",
-                  stdin="y\n")
+        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
         out = r.stdout + r.stderr
         self.assertNotEqual(r.returncode, 0, out)
         self.assertIn("it follows #102 instead", out,
@@ -2281,8 +2335,7 @@ class PositionProofIsLatched(unittest.TestCase):
             boards=[PRE_BOARD, BOARD_200_WRONG_POS, BOARD_WITH_200],
             responses=create_responses([], []),
         )
-        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101",
-                  stdin="y\n")
+        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("board position     ok (after #101)", r.stdout)
 
@@ -2308,7 +2361,7 @@ class DuplicateNumbersInAnAnswer(unittest.TestCase):
         r = h.run("--title", "A brand new distinct piece of work",
                   "--body-file", str(h.body_file), "--shape", "work",
                   "--no-parent", "--after", "101",
-                  "--blocked-by", "122,122", "--blocks", "none", stdin="y\n")
+                  "--blocked-by", "122,122", "--blocks", "none")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("blocked-by         ok (122)", r.stdout)
         argv = create_argv(h)
@@ -2320,7 +2373,7 @@ class DuplicateNumbersInAnAnswer(unittest.TestCase):
     def test_a_repeated_blocker_reads_back_as_correctly_wired_on_adopt(self):
         h = adopt_harness(post_blocked=[122])
         r = h.run("--adopt", ADOPT_NUM, "--no-parent", "--after", "101",
-                  "--blocked-by", "122,122", "--blocks", "none", stdin="y\n")
+                  "--blocked-by", "122,122", "--blocks", "none")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("blocked-by         ok (122)", r.stdout)
         argv = edit_argv(h)
@@ -2337,7 +2390,7 @@ class DuplicateNumbersInAnAnswer(unittest.TestCase):
         r = h.run("--title", "A brand new distinct piece of work",
                   "--body-file", str(h.body_file), "--shape", "work",
                   "--no-parent", "--after", "101",
-                  "--blocked-by", "none", "--blocks", "63,63,63", stdin="y\n")
+                  "--blocked-by", "none", "--blocks", "63,63,63")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("blocks             ok (63)", r.stdout)
 
@@ -2400,8 +2453,7 @@ class ErroredLookupIsNotAnAbsentItem(unittest.TestCase):
                                stdout="", stderr="GraphQL: something broke\n",
                                exit=1),
         )
-        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101",
-                  stdin="y\n")
+        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
         out = r.stdout + r.stderr
         self.assertNotEqual(r.returncode, 0, out)
         self.assertIn("The READ failed, not the write.", out)
@@ -2421,8 +2473,7 @@ class ErroredLookupIsNotAnAbsentItem(unittest.TestCase):
             responses=override(create_responses([], []), "projectItems",
                                stdout="", exit=0),
         )
-        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101",
-                  stdin="y\n")
+        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
         out = r.stdout + r.stderr
         self.assertNotEqual(r.returncode, 0, out)
         self.assertIn("could not find the board item for #101", out)
@@ -2496,8 +2547,7 @@ class AbsentRefusalWording(unittest.TestCase):
         h = Harness("**Design:** none\n",
                     boards=[PRE_BOARD, BOARD_WITHOUT_200],
                     responses=create_responses([], []))
-        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101",
-                  stdin="y\n")
+        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
         out = r.stdout + r.stderr
         self.assertNotEqual(r.returncode, 0, out)
         self.assertNotIn("Add it by hand", out,
@@ -2589,7 +2639,7 @@ class AdoptRecordsTheMove(unittest.TestCase):
         # #200 sits third on ADOPT_PRE_BOARD following #102, and lands second
         # on ADOPT_POST_BOARD following #101.
         h = adopt_harness()
-        r = h.run(*adopt_args(), "--no-parent", "--after", "101", stdin="y\n")
+        r = h.run(*adopt_args(), "--no-parent", "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         calls = comment_calls(h)
         self.assertEqual(1, len(calls), calls)
@@ -2611,7 +2661,7 @@ class AdoptRecordsTheMove(unittest.TestCase):
         # whole trailer could have been deleted from the script with every
         # test still passing.
         h = adopt_harness()
-        r = h.run(*adopt_args(), "--no-parent", "--after", "101", stdin="y\n")
+        r = h.run(*adopt_args(), "--no-parent", "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         body = comment_body(comment_calls(h)[0])
         self.assertIn("Recorded automatically by", body)
@@ -2627,7 +2677,7 @@ class AdoptRecordsTheMove(unittest.TestCase):
     def test_a_position_that_does_not_change_posts_nothing(self):
         # Asking for the slot it already holds: still third, still after #102.
         h = adopt_harness(boards=[ADOPT_PRE_BOARD, ADOPT_PRE_BOARD])
-        r = h.run(*adopt_args(), "--no-parent", "--after", "102", stdin="y\n")
+        r = h.run(*adopt_args(), "--no-parent", "--after", "102")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual([], comment_calls(h))
         self.assertIn("does NOT move it", position_line(r.stdout))
@@ -2638,7 +2688,7 @@ class AdoptRecordsTheMove(unittest.TestCase):
         off_board = [(101, "First thing on the board"), (102, "Second thing")]
         h = adopt_harness(boards=[off_board, ADOPT_POST_BOARD],
                           item_by_number="")
-        r = h.run(*adopt_args(), "--no-parent", "--after", "101", stdin="y\n")
+        r = h.run(*adopt_args(), "--no-parent", "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual([], comment_calls(h))
         self.assertIn("#200 is wired", r.stdout)
@@ -2650,7 +2700,7 @@ class AdoptRecordsTheMove(unittest.TestCase):
             (102, "Second thing"),
         ]
         h = adopt_harness(boards=[ADOPT_PRE_BOARD, top_board])
-        r = h.run(*adopt_args(), "--no-parent", "--top", stdin="y\n")
+        r = h.run(*adopt_args(), "--no-parent", "--top")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         calls = comment_calls(h)
         self.assertEqual(1, len(calls), calls)
@@ -2667,7 +2717,7 @@ class AdoptRecordsTheMove(unittest.TestCase):
             (102, "Second thing"),
         ]
         h = adopt_harness(boards=[from_top, ADOPT_POST_BOARD])
-        r = h.run(*adopt_args(), "--no-parent", "--after", "101", stdin="y\n")
+        r = h.run(*adopt_args(), "--no-parent", "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         body = comment_body(comment_calls(h)[0])
         self.assertIn("from position 1 (the top of the board)", body)
@@ -2680,7 +2730,7 @@ class AdoptRecordsTheMove(unittest.TestCase):
         # asked for #101, which is the half-wired path. A comment claiming a
         # move that did not land is worse than no comment.
         h = adopt_harness(boards=[ADOPT_PRE_BOARD, ADOPT_PRE_BOARD])
-        r = h.run(*adopt_args(), "--no-parent", "--after", "101", stdin="y\n")
+        r = h.run(*adopt_args(), "--no-parent", "--after", "101")
         self.assertNotEqual(r.returncode, 0)
         self.assertEqual([], comment_calls(h))
         self.assertIn("board position", r.stdout + r.stderr)
@@ -2695,7 +2745,7 @@ class AdoptRecordsTheMove(unittest.TestCase):
             responses=[{"match": "issue comment", "stdout": "",
                         "stderr": "HTTP 502", "exit": 1}] + adopt_responses(),
         )
-        r = h.run(*adopt_args(), "--no-parent", "--after", "101", stdin="y\n")
+        r = h.run(*adopt_args(), "--no-parent", "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         err = r.stderr
         self.assertIn("WARNING", err)
@@ -2731,8 +2781,7 @@ class AdoptRecordsTheMove(unittest.TestCase):
         ]
         h = Harness("**Design:** none\n", boards=[PRE_BOARD, board_after],
                     responses=create_responses([], []))
-        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101",
-                  stdin="y\n")
+        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual([], comment_calls(h))
         self.assertNotIn("unbound variable", r.stdout + r.stderr)
@@ -2917,7 +2966,7 @@ class PluckdConfig(unittest.TestCase):
         r = h.run(
             "--title", "A Pluckd bug", "--body-file", str(h.body_file),
             "--shape", "bug", "--no-parent", "--after", "101",
-            "--blocked-by", "none", "--blocks", "none", stdin="y\n",
+            "--blocked-by", "none", "--blocks", "none",
         )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         create_call = create_argv(h)

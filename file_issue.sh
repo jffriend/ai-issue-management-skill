@@ -20,7 +20,7 @@
 #
 # Separately: a truncated board listing hid #164 well enough that a session
 # filed #176 as a duplicate of it. So this prints the board neighbourhood and
-# any near-duplicate titles, makes a human say yes, and treats a truncated
+# any near-duplicate titles, stops before writing when there are any, and treats a truncated
 # board as fatal rather than as a short board.
 #
 # And nothing here reports success from an exit code. Every relationship is
@@ -50,7 +50,7 @@
 #         (--after N | --top) \
 #         (--blocked-by N,N | --blocked-by none) \
 #         (--blocks N,N | --blocks none) \
-#         [--dry-run]
+#         [--dry-run] [--file-anyway]
 #
 #   ADOPT an issue that already exists and wire it:
 #     bash file_issue.sh --config config.json --adopt N \
@@ -75,12 +75,17 @@
 #
 #   The one thing adopt does NOT refuse is the board POSITION. All four
 #   placement answers are mandatory, so a position is always named, and adopt
-#   MOVES the issue to it. The confirmation summary names where the issue sits
-#   today beside where you are sending it, so the slot you are giving up is
-#   visible before you say yes.
+#   MOVES the issue to it. The summary names where the issue sits today beside
+#   where you are sending it, and the move is recorded as a comment on the
+#   issue once the read-back proves it landed.
 #
-#   --dry-run stops after the board neighbourhood and the confirmation summary.
-#   Nothing is created and nothing is changed.
+#   There is no confirmation prompt; a run without --dry-run writes. The one
+#   exception is a create run that finds possible duplicates: it prints them
+#   and stops with exit code 3, having created nothing. Re-run with
+#   --file-anyway once you have ruled them out. Every other refusal exits 1.
+#
+#   --dry-run stops after the board neighbourhood, the duplicate check and the
+#   summary. Nothing is created and nothing is changed.
 #
 #   BODIES AND COMMENTS. This script never edits the body of an issue that
 #   already exists — adopt refuses --body-file for that reason. But the rule
@@ -178,7 +183,7 @@ TITLE=""
 BODY_FILE=""
 SHAPE=""
 ADOPT=""
-# THE MOVE RECORD (adopt mode only), latched where the confirmation screen
+# THE MOVE RECORD (adopt mode only), latched where the pre-write summary
 # decides it. Adopt does not refuse a reposition — it MOVES the issue — and
 # until this existed the slot it moved FROM was recorded nowhere, so a real
 # prior priority decision vanished the moment it was overwritten. These three
@@ -205,6 +210,7 @@ BLOCKED_BY_SET=0
 BLOCKS=""
 BLOCKS_SET=0
 DRY_RUN=0
+FILE_ANYWAY=0
 
 die() { printf '%s\n' "$*" >&2; exit 1; }
 
@@ -269,6 +275,7 @@ while [ $# -gt 0 ]; do
     --blocked-by) BLOCKED_BY="${2-}"; BLOCKED_BY_SET=1; shift 2 || die "ERROR: --blocked-by needs a value." ;;
     --blocks)     BLOCKS="${2-}"; BLOCKS_SET=1; shift 2 || die "ERROR: --blocks needs a value." ;;
     --dry-run)    DRY_RUN=1; shift ;;
+    --file-anyway) FILE_ANYWAY=1; shift ;;
     -h|--help)    usage; exit 0 ;;
     *)            die "ERROR: unknown flag: $1" ;;
   esac
@@ -348,6 +355,9 @@ if [ "$MODE" = adopt ]; then
        shape are already on the server. Pass the four placement answers only."
     fi
   done
+  [ "$FILE_ANYWAY" -eq 0 ] || die "ERROR: --adopt and --file-anyway are contradictory. $NOTHING
+       --file-anyway waves a create run past its possible duplicates. Adopt
+       has no duplicate check, because the issue already exists."
   case "$ADOPT" in
     *[!0-9]*|"") die "ERROR: --adopt takes an issue number (got: $ADOPT). $NOTHING" ;;
   esac
@@ -676,9 +686,9 @@ $missing
 probe_gh_capability
 
 # ---------------------------------------------------------------------------
-# From here on calls go to the network. Everything down to the confirmation
-# prompt is still READ-ONLY: nothing creates or changes anything until the
-# prompt is answered yes.
+# From here on calls go to the network. Everything down to the --dry-run exit
+# and the possible-duplicates stop is still READ-ONLY: nothing creates or
+# changes anything before them.
 # ---------------------------------------------------------------------------
 
 BOARD_JSON="$(mktemp -t file_issue_board.XXXXXX)"
@@ -841,7 +851,7 @@ if [ "$MODE" = create ]; then
   DUPES="$(python3 "$SCRIPT_DIR/issue_text.py" dupes "$TITLE" "$TITLES_JSON")"
   if [ -n "$DUPES" ]; then
     echo "########################################################################"
-    echo "## POSSIBLE DUPLICATES — read these before you answer                  #"
+    echo "## POSSIBLE DUPLICATES — read these before anything is filed          #"
     echo "########################################################################"
     printf '%s\n' "$DUPES" | awk -F'\t' '{printf "   %-7s %s\n        %s\n", $1, $2, $3}'
     echo "########################################################################"
@@ -909,12 +919,20 @@ if [ "$DRY_RUN" -eq 1 ]; then
   exit 0
 fi
 
-printf '%s' "$( [ "$MODE" = adopt ] && printf 'Wire it? [y/N] ' || printf 'Create it? [y/N] ' )"
-read -r ANSWER || ANSWER=""
-case "$ANSWER" in
-  y|Y|yes|YES) ;;
-  *) die "Not confirmed. $NOTHING" ;;
-esac
+# There is no confirmation prompt. Under an agent, stdin is never a terminal,
+# so the prompt only ever read a `y` piped in ahead of time. What it guarded
+# that the engine cannot judge is whether this is a duplicate, so that is
+# where a run stops: possible duplicates and no --file-anyway means nothing is
+# written, with an exit code of its own so the caller can tell "go judge
+# these" from a refusal. Everything else -- the placement refusals, the
+# truncated board, adopt's refusals, the read-back, the move record -- never
+# depended on the prompt and still runs.
+if [ "$MODE" = create ] && [ -n "$DUPES" ] && [ "$FILE_ANYWAY" -eq 0 ]; then
+  echo "STOPPED: possible duplicates listed above. $NOTHING" >&2
+  echo "       If none of them is the same work, re-run the same command with" >&2
+  echo "       --file-anyway." >&2
+  exit 3
+fi
 
 # ---------------------------------------------------------------------------
 # Apply. This is the ONE place the two modes legitimately differ: create folds
@@ -1438,7 +1456,7 @@ if [ "$ADOPT_MOVED" -eq 1 ]; then
 Recorded automatically by \`scripts/file_issue.sh\` when this issue was wired
 onto project $PROJECT_NUMBER, so the slot it came from stays recoverable.
 The destination was read back from the board and verified; the origin is the
-slot shown on the confirmation screen immediately before the move."
+slot shown in the pre-write summary immediately before the move."
 
   # BEST EFFORT, AND LOUD WHEN IT FAILS. The wiring has already landed and
   # already been verified by the time this runs. So a failed comment must not
