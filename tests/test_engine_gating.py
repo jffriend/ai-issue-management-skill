@@ -31,7 +31,7 @@ The fake logs every argv it is given and replies from a canned response table.
 No test reaches github.com. The refusal tests do not even get that far -- the
 argument gate runs before the first network call, which is the point of it.
 
-Run:  python3 tests/test_file_issue_gating.py
+Run:  python3 tests/test_engine_gating.py
 """
 
 import json

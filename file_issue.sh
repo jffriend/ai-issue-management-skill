@@ -180,7 +180,7 @@ NEIGHBOURS=3
 # wall-clock tolerance". It stays allowed, deliberately: the ceiling exists
 # to bound real wall-clock hang risk, and a wait that is always zero cannot
 # create that risk regardless of ATTEMPTS. It is also load-bearing —
-# tests/test_file_issue_gating.py runs the retry path at DELAY=0 to stay
+# tests/test_engine_gating.py runs the retry path at DELAY=0 to stay
 # fast and deterministic. What DELAY=0 does NOT do is buy extra retries with
 # real tolerance; an operator chasing more real wall-clock budget still
 # needs a non-zero DELAY, per the warning above.
@@ -332,7 +332,8 @@ case "$PROJECT_NUMBER" in
   ''|*[!0-9]*) die "ERROR: config $CONFIG is missing or has a non-numeric project_number (got: ${PROJECT_NUMBER:-<empty>})." ;;
 esac
 [ -n "$PROJECT_ID" ] || die "ERROR: config $CONFIG is missing required field: project_id
-       (the project board's node id -- needed to write to it). $NOTHING"
+       (the project board's node id -- needed to set a board position). $NOTHING"
+PROJECT_PATH="users/$OWNER/projectsV2/$PROJECT_NUMBER"
 if [ "$DESIGN_LINE_REQUIRED" = "true" ] && [ -z "$PLAN_DIR" ]; then
   die "ERROR: config $CONFIG sets design_line_required=true but has no plan_dir set."
 fi
@@ -415,7 +416,7 @@ fi
 # top of the typo one: the board lookups that use it are grep matches, and an
 # unvalidated value is a REGEX. `printf '101\n144\n107\n' | grep -qx '1.4'`
 # succeeds, so `--after 1.4` used to pass the "is it on the board" gate, the
-# issue was created, and the GraphQL lookup — which takes an Int! — then failed
+# issue was created, and the lookup of a non-number then failed
 # and left the run reporting HALF-WIRED with the delete remedy. Both halves are
 # fixed: digits only here, and -F (fixed string) on every board lookup below.
 if [ -n "$AFTER" ]; then
@@ -498,8 +499,8 @@ parenting_rule() {
 # ---------------------------------------------------------------------------
 # The capability probe. Issue #14 moves every GitHub call this script makes to
 # `gh api` REST paths, leaving the board-position write as its one GraphQL
-# call, and `gh api` long predates anything here relies on. So the probe asks
-# one thing: is gh on PATH. It used to read `gh issue create/edit --help` and
+# call, and the `gh api` features it uses are old enough to need no version
+# check. So the probe asks one thing: is gh on PATH. It used to read `gh issue create/edit --help` and
 # `gh issue view --json` for native relationship flags and fields, which the
 # REST paths do not use.
 #
@@ -551,10 +552,11 @@ trap cleanup EXIT
 # REST helpers. gh_api runs `gh api` with its arguments, passes stdout through
 # and keeps stderr in $GH_API_ERR, so a caller can tell WHY a call failed:
 # gh_api_failed_with reads gh's own "(HTTP NNN)" suffix from it, and a failure
-# that does not carry that status is never read as it. gh's message is no
-# longer on the terminal, so a caller that reports the failure prints it.
+# that does not carry that status is never read as it. gh's message never
+# reaches the terminal, so a caller that reports a failure prints gh_api_err.
 gh_api() { gh api "$@" 2>"$GH_API_ERR"; }
 gh_api_failed_with() { grep -qF "(HTTP $1)" "$GH_API_ERR"; }
+gh_api_err() { tr '\n' ' ' <"$GH_API_ERR"; }
 
 issue_numeric_id() {
   # $1 an issue number. Prints the issue's numeric REST `id` -- what the
@@ -678,7 +680,7 @@ if [ "$MODE" = adopt ]; then
     dep_pairs="$(dependency_entries "$dep_json")"
     if [ "$dep_rc" -ne 0 ] || [ "$dep_pairs" = "BAD" ]; then
       die "ERROR: --adopt $ADOPT — the $( [ "$dep" = blocked_by ] && echo blocked-by || echo blocks ) links of #$ADOPT could not be read from $REPO.
-       $(tr '\n' ' ' <"$GH_API_ERR")
+       $(gh_api_err)
        $NOTHING"
     fi
     if [ "$dep" = blocked_by ]; then FOUND_BLOCKED_PAIRS="$dep_pairs"; else FOUND_BLOCKING_PAIRS="$dep_pairs"; fi
@@ -815,7 +817,7 @@ if [ "$MODE" = create ]; then
   titles_pages=""
   while [ "$titles_raw" -lt "$TITLES_LIMIT" ]; do
     page_json="$(gh_api "repos/$REPO/issues?state=open&per_page=100&page=$titles_page")" \
-      || die "ERROR: could not list open issues to check for duplicates ($(tr '\n' ' ' <"$GH_API_ERR")). Nothing was created."
+      || die "ERROR: could not list open issues to check for duplicates ($(gh_api_err)). Nothing was created."
     # Fail closed on the shape: a reply that is not an array of issues would
     # otherwise count as an empty page and end the listing as "no duplicates".
     page_len="$(printf '%s' "$page_json" | jq -r 'if type == "array" then length else empty end' 2>/dev/null)"
@@ -1045,7 +1047,7 @@ resolve_or_refuse() {
     0) RESOLVED_ID="$id" ;;
     2) die "ERROR: $1 $2 — issue #$2 does not exist in $REPO. $NOTHING" ;;
     *) die "ERROR: $1 $2 — issue #$2 could not be read from $REPO, so its id is unknown.
-       $(tr '\n' ' ' <"$GH_API_ERR")
+       $(gh_api_err)
        $NOTHING" ;;
   esac
 }
@@ -1060,7 +1062,7 @@ post_link() {
   shift
   if ! gh_api -X POST "$@" >/dev/null; then
     LINK_WRITE_FAILED=1
-    echo "WARNING: writing $what for #$NUM exited non-zero: $(tr '\n' ' ' <"$GH_API_ERR")" >&2
+    echo "WARNING: writing $what for #$NUM exited non-zero: $(gh_api_err)" >&2
   fi
 }
 
@@ -1104,7 +1106,7 @@ if [ "$MODE" = create ]; then
   # link write warns and carries on, and the refusal the read-back picks names
   # the adopt command that writes only what is missing.
   CREATE_REPLY="$(gh_api -X POST "repos/$REPO/issues" -f title="$TITLE" -F body=@"$BODY_FILE" "${LABEL_FIELDS[@]}")" \
-    || die "ERROR: the issue create failed: $(tr '\n' ' ' <"$GH_API_ERR")
+    || die "ERROR: the issue create failed: $(gh_api_err)
        Nothing to read back."
   NUM="$(printf '%s' "$CREATE_REPLY" | jq -r '.number // ""' 2>/dev/null)"
   URL="$(printf '%s' "$CREATE_REPLY" | jq -r '.html_url // ""' 2>/dev/null)"
@@ -1206,7 +1208,7 @@ board_membership_corroboration() {
   # another shape -- is "not shown", never a pass.
   local reply
   [ -n "$ITEM_REST_ID" ] || return 1
-  reply="$(gh_api "users/$OWNER/projectsV2/$PROJECT_NUMBER/items/$ITEM_REST_ID")" || return 1
+  reply="$(gh_api "$PROJECT_PATH/items/$ITEM_REST_ID")" || return 1
   [ "$(printf '%s' "$reply" | jq -r --argjson n "$1" '.content.number == $n' 2>/dev/null)" = "true" ]
 }
 
@@ -1230,7 +1232,7 @@ write_position() {
     POSITION_DEGRADED=1
     return 0
   fi
-  half_wired "the board position write failed for #$NUM: $(tr '\n' ' ' <"$GH_API_ERR")"
+  half_wired "the board position write failed for #$NUM: $(gh_api_err)"
 }
 
 board_half() {
@@ -1253,9 +1255,9 @@ board_half() {
     take_item "$(board_row_item "$BOARD_ROWS" "$NUM")"
   fi
   if [ -z "$ITEM_ID" ]; then
-    take_item "$(gh_api -X POST "users/$OWNER/projectsV2/$PROJECT_NUMBER/items" -f type=Issue -F id="$SELF_ID" \
+    take_item "$(gh_api -X POST "$PROJECT_PATH/items" -f type=Issue -F id="$SELF_ID" \
       | jq -r '"\(.node_id)\t\(.id)"' 2>/dev/null)" \
-      || add_err="$(tr '\n' ' ' <"$GH_API_ERR")"
+      || add_err="$(gh_api_err)"
   fi
   # A board with GitHub's auto-add workflow puts a NEW issue on it before
   # item-add runs, and item-add then refuses it as already there and returns
@@ -1295,7 +1297,7 @@ board_half
 # >>> SHARED READ-BACK START
 # Read back. An exit code is not evidence. Both modes call this ONE
 # implementation; no relationship comparison exists anywhere else in this file,
-# and tests/test_file_issue_gating.py scans for a second copy.
+# and tests/test_engine_gating.py scans for a second copy.
 DEPENDENCY_NUMBERS=""
 read_dependency_numbers() {
   # $1 the dependency list (blocked_by or blocking), $2 its name in a refusal.
@@ -1307,7 +1309,7 @@ read_dependency_numbers() {
   rc=$?
   entries="$(dependency_entries "$reply")"
   [ "$rc" -eq 0 ] \
-    || half_wired_unreadable "the $2 links of #$NUM could not be read back — gh exited $rc: $(tr '\n' ' ' <"$GH_API_ERR")"
+    || half_wired_unreadable "the $2 links of #$NUM could not be read back — gh exited $rc: $(gh_api_err)"
   [ "$entries" != "BAD" ] \
     || half_wired_unreadable "the $2 links of #$NUM came back in an unrecognised shape — the reply is not a list of issues"
   DEPENDENCY_NUMBERS="$(norm "$(entry_numbers "$entries")")"
@@ -1503,7 +1505,7 @@ read_back() {
   # anything.
   REL_JSON="$(gh_api "repos/$REPO/issues/$NUM")"
   REL_RC=$?
-  [ "$REL_RC" -eq 0 ] || half_wired_unreadable "the relationships of #$NUM could not be read back — gh exited $REL_RC: $(tr '\n' ' ' <"$GH_API_ERR")"
+  [ "$REL_RC" -eq 0 ] || half_wired_unreadable "the relationships of #$NUM could not be read back — gh exited $REL_RC: $(gh_api_err)"
   [ -n "$REL_JSON" ] || half_wired_unreadable "the relationships of #$NUM could not be read back at all"
   [ "$(printf '%s' "$REL_JSON" | jq -r 'type == "object" and has("number") and has("state")' 2>/dev/null)" = "true" ] \
     || half_wired_unreadable "the relationships of #$NUM came back in an unrecognised shape — the issue reply carries no number/state to read a parent from"
@@ -1589,7 +1591,7 @@ slot shown in the pre-write summary immediately before the move."
   MOVE_RC=0
   gh_api -X POST "repos/$REPO/issues/$NUM/comments" -f body="$MOVE_COMMENT" >/dev/null \
     || MOVE_RC=$?
-  MOVE_ERR="$(tr '\n' ' ' <"$GH_API_ERR")"
+  MOVE_ERR="$(gh_api_err)"
   if [ "$MOVE_RC" -eq 0 ]; then
     echo "  move recorded      ok ($MOVE_SUMMARY)"
   else
