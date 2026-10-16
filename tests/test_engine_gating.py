@@ -1622,6 +1622,36 @@ class AdoptDelta(unittest.TestCase):
         self.assertNotIn("nothing was written", out.lower())
 
 
+class AdoptResolvesBeforeWriting(unittest.TestCase):
+    """KTD3 holds in adopt too: every number adopt is about to link is
+    resolved before the first write. A typo in --parent or --blocks used to
+    surface only as a 404 on its own POST, after the other links had landed,
+    leaving the issue partly wired."""
+
+    MISSING = [{"match": "issues/999", "exit": 1,
+                "stderr": "gh: Not Found (HTTP 404)\n"}]
+
+    def _adopt(self, *args):
+        h = Harness("**Design:** none\n",
+                    boards=[ADOPT_PRE_BOARD, ADOPT_POST_BOARD],
+                    responses=self.MISSING + adopt_responses())
+        return h, h.run("--adopt", ADOPT_NUM, *args)
+
+    def test_a_blocks_number_that_does_not_exist_refuses_before_any_write(self):
+        h, r = self._adopt("--no-parent", "--after", "101",
+                           "--blocked-by", "122", "--blocks", "999")
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        self.assertIn("#999 does not exist", r.stderr)
+        self.assertTrue(wrote_nothing(h), "the blocked-by link must not land first")
+
+    def test_a_parent_number_that_does_not_exist_refuses_before_any_write(self):
+        h, r = self._adopt("--parent", "999", "--after", "101",
+                           "--blocked-by", "122", "--blocks", "none")
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        self.assertIn("#999 does not exist", r.stderr)
+        self.assertTrue(wrote_nothing(h), "the blocked-by link must not land first")
+
+
 class AdoptReadBack(unittest.TestCase):
     """The SAME read-back the create path uses, applied to an existing issue."""
 
@@ -2806,6 +2836,21 @@ class DegradedPosition(unittest.TestCase):
         self.assertEqual([], comment_calls(h), "nothing moved, so nothing to record")
         self.assertNotIn("move recorded", r.stdout)
         self.assertIn("--adopt 200 --no-parent --after 101", r.stderr)
+
+    def test_a_degraded_adopt_already_in_place_proves_the_position(self):
+        # #200 already follows #102 on ADOPT_PRE_BOARD, so nothing has to
+        # move: a refused position write changes nothing, and the read-back
+        # proves the position instead of reporting it NOT SET.
+        responses = override(adopt_responses(), POSITION_MATCH, **POSITION_403)
+        h = Harness("**Design:** none\n",
+                    boards=[ADOPT_PRE_BOARD, ADOPT_PRE_BOARD],
+                    responses=responses)
+        r = h.run(*adopt_args(), "--no-parent", "--after", "102")
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertIn("does NOT move it", position_line(r.stdout))
+        self.assertIn("board position     ok", r.stdout)
+        self.assertNotIn("NOT SET", r.stdout + r.stderr)
+        self.assertEqual([], comment_calls(h))
 
 
 class RetryCeilingIsEnforced(unittest.TestCase):

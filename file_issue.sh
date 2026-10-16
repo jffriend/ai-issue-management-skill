@@ -1145,10 +1145,13 @@ else
   # above; an already matching one is skipped. If the delta is empty nothing
   # is written at all — and the read-back still runs, because it is the only
   # proof anything holds.
+  # Every number about to be linked is resolved before any write, as create
+  # does (KTD3). A typo found by its own POST would come after the other links
+  # had landed, leaving the issue partly wired.
   ADD_PARENT=""
   [ -n "$PARENT" ] && [ "$PARENT" != "$FOUND_PARENT" ] && ADD_PARENT="$PARENT"
+  [ -n "$ADD_PARENT" ] && resolve_or_refuse --parent "$ADD_PARENT"
 
-  # Each missing blocker's id is resolved before any write, as create does.
   ADD_BLOCKED_PAIRS=""
   for n in $ASKED_BLOCKED; do
     in_set "$n" "$FOUND_BLOCKED" && continue
@@ -1158,7 +1161,9 @@ else
 
   ADD_BLOCKING=""
   for n in $ASKED_BLOCKING; do
-    in_set "$n" "$FOUND_BLOCKING" || ADD_BLOCKING="$ADD_BLOCKING $n"
+    in_set "$n" "$FOUND_BLOCKING" && continue
+    resolve_or_refuse --blocks "$n"
+    ADD_BLOCKING="$ADD_BLOCKING $n"
   done
 
   if [ -z "$ADD_PARENT$ADD_BLOCKED_PAIRS$ADD_BLOCKING" ]; then
@@ -1229,6 +1234,11 @@ write_position() {
       -f p="$PROJECT_ID" -f i="$ITEM_ID" -f a="$1" >/dev/null && return 0
   fi
   if gh_api_failed_with 403; then
+    # An adopted issue the summary already found in the asked-for slot did
+    # not need to move, so a refused write changed nothing: leave the
+    # position to the read-back, which proves it, instead of reporting it
+    # NOT SET and sending the operator to fix a position that is right.
+    [ "$MODE" = adopt ] && [ -n "$ADOPT_IDX" ] && [ "$ADOPT_MOVED" -eq 0 ] && return 0
     POSITION_DEGRADED=1
     return 0
   fi
