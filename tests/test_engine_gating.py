@@ -31,7 +31,7 @@ The fake logs every argv it is given and replies from a canned response table.
 No test reaches github.com. The refusal tests do not even get that far -- the
 argument gate runs before the first network call, which is the point of it.
 
-Run:  python3 tests/test_file_issue_gating.py
+Run:  python3 tests/test_engine_gating.py
 """
 
 import json
@@ -114,33 +114,49 @@ sys.stdout.write("{}")
 '''
 
 
-def board_page(rows, has_next=False, cursor="C1"):
-    """One page of the shape scripts/board.sh reads."""
-    nodes = []
+# The Status field's numeric id in the fake's fields listing. board.sh asks
+# for the field by this id, because the REST items endpoint's `fields`
+# parameter takes ids, not names (`fields=Status` is an HTTP 400).
+STATUS_FIELD_ID = 77001
+FIELDS_WITH_STATUS = [
+    {"id": 77000, "name": "Title", "data_type": "title"},
+    {"id": STATUS_FIELD_ID, "name": "Status", "data_type": "single_select"},
+]
+
+
+def board_page(rows, next_cursor=None, status="Backlog"):
+    """One page as `gh api -i users/{owner}/projectsV2/{n}/items` prints it.
+
+    The status line, the response headers, a blank line, then the REST item
+    array. A page with more after it carries a `Link` header whose
+    `rel="next"` URL holds the `after` cursor -- listed AFTER a `rel="prev"`
+    entry, so a parser that takes the first URL in the header reads the
+    wrong one. Header lines end in CRLF, as real gh prints them.
+    """
+    items = []
     for num, title in rows:
-        nodes.append(
+        items.append(
             {
-                "fieldValueByName": {"name": "Backlog"},
-                "content": {
-                    "number": num,
-                    "title": title,
-                    "state": "OPEN",
-                    "blockedBy": {"nodes": []},
-                },
+                "id": 900000 + num,
+                "node_id": "PVTI_%d" % num,
+                "content_type": "Issue",
+                "content": {"number": num, "title": title, "state": "open"},
+                "fields": [
+                    {
+                        "id": STATUS_FIELD_ID,
+                        "name": "Status",
+                        "data_type": "single_select",
+                        "value": {"name": {"raw": status, "html": status}},
+                    }
+                ],
             }
         )
-    return {
-        "data": {
-            "user": {
-                "projectV2": {
-                    "items": {
-                        "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
-                        "nodes": nodes,
-                    }
-                }
-            }
-        }
-    }
+    head = "HTTP/2.0 200 OK\nContent-Type: application/json; charset=utf-8\r\n"
+    if next_cursor is not None:
+        base = "https://api.github.com/user/1/projectsV2/2/items?per_page=100"
+        head += ('Link: <%s&before=PREV>; rel="prev", <%s&after=%s>; rel="next"\r\n'
+                 % (base, base, next_cursor))
+    return head + "\r\n" + json.dumps(items)
 
 
 DEFAULT_BOARD = [
@@ -157,131 +173,85 @@ DEFAULT_BOARD = [
 
 GH_VERSION_LINE = "gh version 2.98.0 (2026-08-20)\n"
 
-# The three flags U1's write path uses, as `gh issue create --help` prints them.
-CREATE_FLAG_LINES = (
-    "      --parent number        Add this issue to a parent issue\n"
-    "      --blocked-by numbers   Mark this issue as blocked by other issues\n"
-    "      --blocking numbers     Mark this issue as blocking other issues\n"
-)
+# The duplicate check's open-issue listing, `GET repos/{repo}/issues?state=
+# open&per_page=100&page=N`. The listing includes pull requests.
+TITLES_MATCH = "/issues?state=open"
 
 
-def create_help(flag_lines=CREATE_FLAG_LINES):
-    """`gh issue create --help`, shaped like the real one.
+def titles_pages(entries):
+    """The open-issue listing as the pages the script asks for, in order.
 
-    The EXAMPLES section names all three flags on purpose. The real help does
-    too -- `--parent` appears three times in it -- which is why the probe has
-    to anchor to the FLAGS block. A probe that grepped the whole text would
-    pass on a `gh` that has none of the flags.
+    100 to a page, the size the script asks for. A full last page is followed
+    by an empty one, because the fake repeats its last reply: without the
+    empty page a run asking for page N+1 would get page N again.
     """
-    return (
-        "Create an issue on GitHub.\n"
-        "\n"
-        "USAGE\n"
-        "  gh issue create [flags]\n"
-        "\n"
-        "FLAGS\n"
-        "  -a, --assignee login   Assign people by their login\n"
-        "  -b, --body string      Supply a body\n"
-        + flag_lines
-        + "  -w, --web              Open the browser to create an issue\n"
-        "\n"
-        "INHERITED FLAGS\n"
-        "      --repo [HOST/]OWNER/REPO   Select another repository\n"
-        "\n"
-        "EXAMPLES\n"
-        "  $ gh issue create --parent 123 --blocked-by 4 --blocking 5\n"
-    )
+    pages = [entries[i:i + 100] for i in range(0, len(entries), 100)] or [[]]
+    if len(pages[-1]) == 100:
+        pages.append([])
+    return [json.dumps(p) for p in pages]
 
 
-# The six flags U2's adopt write path uses, as `gh issue edit --help` prints them.
-EDIT_FLAG_LINES = (
-    "      --parent number              Add this issue to a parent issue\n"
-    "      --remove-parent              Remove the parent of this issue\n"
-    "      --add-blocked-by numbers     Mark this issue as blocked by other issues\n"
-    "      --remove-blocked-by numbers  Remove blocked-by relationships\n"
-    "      --add-blocking numbers       Mark this issue as blocking other issues\n"
-    "      --remove-blocking numbers    Remove blocking relationships\n"
-)
+# Every issue's numeric REST `id` in the fake: what the sub-issue and
+# dependency endpoints take, never the number. Offset so an id can never be
+# mistaken for a number, and so a test can turn one back into the other.
+ISSUE_ID_BASE = 7000000
 
 
-def edit_help(flag_lines=EDIT_FLAG_LINES):
-    """`gh issue edit --help`, shaped like the real one.
+def issue_id(n):
+    return ISSUE_ID_BASE + int(n)
 
-    Adopt mode swaps this sub-command into the probe's needed-flags table, so
-    a `gh` whose `issue edit` lacks the relationship flags must refuse an adopt
-    exactly as a `gh` whose `issue create` lacks them refuses a create.
+
+def issue_reply(n, state="open", body="", parent=None):
+    """`GET repos/{repo}/issues/{n}` as GitHub returns it.
+
+    `parent_issue_url` is ABSENT on a parentless issue, not null -- measured
+    2026-10-15 -- so it is added only when there is a parent.
     """
-    return (
-        "Edit an issue on GitHub.\n"
-        "\n"
-        "USAGE\n"
-        "  gh issue edit {<numbers> | <urls>} [flags]\n"
-        "\n"
-        "FLAGS\n"
-        "      --add-label names      Add labels by name\n"
-        "  -b, --body string          Set the new body\n"
-        + flag_lines
-        + "  -t, --title string     Set the new title\n"
-        "\n"
-        "INHERITED FLAGS\n"
-        "      --repo [HOST/]OWNER/REPO   Select another repository\n"
-        "\n"
-        "EXAMPLES\n"
-        "  $ gh issue edit 23 --parent 1 --add-blocked-by 4 --add-blocking 5\n"
-    )
+    d = {"id": issue_id(n), "number": int(n), "state": state, "body": body,
+         "html_url": "https://github.com/jffriend/photo-consolidation/issues/%d" % int(n)}
+    if parent:
+        d["parent_issue_url"] = (
+            "https://api.github.com/repos/jffriend/photo-consolidation/issues/%d"
+            % int(parent))
+    return d
 
 
-# The field list bare `gh issue view --json` prints -- to STDERR, exiting 1.
-JSON_FIELDS = (
-    "assignees", "author", "blockedBy", "blocking", "body", "closed",
-    "number", "parent", "state", "title", "url",
-)
+# The issues the tests name as a parent, a blocker or a blocked issue. Create
+# reads each once for its id before writing anything (#14 KTD3). No number
+# here is a prefix of another, because the fake matches on substrings.
+REFERENCED = (55, 63, 70, 77, 122, 133, 240)
 
 
-def json_field_list(fields=JSON_FIELDS):
-    return (
-        "Specify one or more comma-separated fields for `--json`:\n"
-        + "".join("  %s\n" % f for f in fields)
-    )
+def referenced_issue_rules():
+    """One `GET repos/{repo}/issues/{n}` rule per referenced issue.
 
-
-def probe_rules(version_line=GH_VERSION_LINE, help_text=None, help_exit=0,
-                fields=JSON_FIELDS, fields_text=None, fields_exit=1,
-                flag_lines=None, edit_flag_lines=None, edit_help_text=None,
-                edit_help_exit=0):
-    """The fake's answers to the capability probe.
-
-    These belong in the BASE table, not in `create_responses()`: most gate
-    tests build a `Harness` with no response table at all, and a probe rule
-    that only existed in the create table would leave them falling through to
-    the fake's `{}` default -- so every one of them would get the probe refusal
-    instead of the refusal it asserts.
+    These go LAST in a table: `issues/55` is also a substring of the
+    `issues/55/sub_issues` write, which the `-X POST` rule must answer first.
     """
-    if help_text is None:
-        help_text = create_help(
-            CREATE_FLAG_LINES if flag_lines is None else flag_lines)
-    if edit_help_text is None:
-        edit_help_text = edit_help(
-            EDIT_FLAG_LINES if edit_flag_lines is None else edit_flag_lines)
-    if fields_text is None:
-        fields_text = json_field_list(fields) if fields else ""
-    return [
-        {"match": "--version", "stdout": version_line},
-        {"match": "issue create --help", "stdout": help_text, "exit": help_exit},
-        # Adopt mode probes `gh issue edit` instead of `gh issue create`.
-        {"match": "issue edit --help", "stdout": edit_help_text,
-         "exit": edit_help_exit},
-        # Bare `gh issue view --json` writes to stderr and exits 1. That
-        # non-zero exit is normal and must not read as "undeterminable".
-        {"match": "issue view --json", "stderr": fields_text, "exit": fields_exit},
-    ]
+    return [{"match": "issues/%d" % n, "stdout": json.dumps(issue_reply(n))}
+            for n in REFERENCED]
+
+def probe_rules(version_line=GH_VERSION_LINE):
+    """The fake's answer to `gh --version`, the only thing the probe asks.
+
+    This belongs in the BASE table, not in `create_responses()`: most gate
+    tests build a `Harness` with no response table at all.
+    """
+    return [{"match": "--version", "stdout": version_line}]
+
+
+GRAPHQL_BLOCKED_RULE = {
+    "match": "graphql", "exit": 1, "stdout": "",
+    "stderr": "gh: Resource not accessible by integration (HTTP 403)\n",
+}
 
 
 class Harness:
     """A temp dir holding a body file, a fake `gh`, and its response table."""
 
     def __init__(self, body, boards=None, responses=None, probe=None,
-                 board_exits=None, config=None):
+                 board_exits=None, config=None, board_stdouts=None,
+                 fields=None, graphql_blocked=False):
         self.dir = Path(tempfile.mkdtemp(prefix="file_issue_test_"))
         self.body_file = self.dir / "body.md"
         self.body_file.write_text(body)
@@ -296,14 +266,27 @@ class Harness:
         self.calls_log = self.dir / "calls.log"
         self.calls_log.write_text("")
         boards = [DEFAULT_BOARD] if boards is None else boards
-        pages = [json.dumps(board_page(b)) for b in boards]
-        titles = json.dumps([{"number": n, "title": t} for n, t in boards[0]])
-        board_rule = {"match": "items(first: 100", "stdouts": pages}
+        # One single-page board per board READ, in order. `board_stdouts`
+        # replaces that with raw page replies, one per board-page CALL, which
+        # is how a test hands back a board that spans several pages.
+        pages = ([board_page(b) for b in boards] if board_stdouts is None
+                 else list(board_stdouts))
+        titles = titles_pages([{"number": n, "title": t} for n, t in boards[0]])
+        project = self.config["project_number"]
+        board_rule = {"match": "projectsV2/%s/items?per_page=" % project,
+                      "stdouts": pages}
         if board_exits is not None:
             board_rule["exits"] = list(board_exits)
-        table = [
+        # `graphql_blocked` refuses every GraphQL call the way a session
+        # without GraphQL access does (#14 KTD10): exit 1, gh's `(HTTP 403)`
+        # suffix on stderr. It goes FIRST, so no other rule can answer one.
+        table = [GRAPHQL_BLOCKED_RULE] if graphql_blocked else []
+        table += [
             board_rule,
-            {"match": "issue list", "stdout": titles},
+            {"match": "projectsV2/%s/fields" % project,
+             "stdout": json.dumps(FIELDS_WITH_STATUS if fields is None
+                                  else fields)},
+            {"match": TITLES_MATCH, "stdouts": titles},
         ]
         table.extend(probe_rules() if probe is None else probe)
         table.extend(responses or [])
@@ -360,31 +343,27 @@ class Harness:
         ]
 
     def called(self, *needles):
-        """True when one NON-PROBE call carries every needle.
-
-        `--help` calls are skipped. The capability probe runs
-        `gh issue create --help`, which otherwise satisfies
-        `called("issue", "create")` and would make five "no create happened"
-        assertions pass on a probe call instead of a create.
-        """
+        """True when one call carries every needle."""
         for call in self.calls():
             joined = " ".join(call)
-            if "--help" in call:
-                continue
             if all(n in joined for n in needles):
                 return True
         return False
 
     def network_calls(self):
-        """Every call that is not part of the offline capability probe."""
-        out = []
-        for call in self.calls():
-            if "--help" in call or call == ["--version"]:
-                continue
-            if call[:3] == ["issue", "view", "--json"]:
-                continue
-            out.append(call)
-        return out
+        """Every call except the probe's offline `gh --version`."""
+        return [call for call in self.calls() if call != ["--version"]]
+
+    def create_posts(self):
+        """Every issue-create call: `gh api -X POST repos/{repo}/issues`."""
+        return [c for c in self.calls()
+                if c[:3] == ["api", "-X", "POST"] and len(c) > 3
+                and c[3].startswith("repos/") and c[3].endswith("/issues")
+                and c[3].count("/") == 3]
+
+    def created(self):
+        """True when this run sent an issue create."""
+        return bool(self.create_posts())
 
 
 def full_args(body_file, **over):
@@ -414,7 +393,7 @@ class RequiredFlags(unittest.TestCase):
         r = self.h.run(*args)
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertFalse(
-            self.h.called("issue", "create", "--title"),
+            self.h.created(),
             "refusal must happen before any create",
         )
         return r.stdout + r.stderr
@@ -504,15 +483,15 @@ class PhotosConfigShapes(unittest.TestCase):
 
     def test_bug_shape_carries_the_bug_label(self):
         call = self._create_call_for("bug", "A brand new bug")
-        self.assertIn("bug", call)
+        self.assertIn("labels[]=bug", call)
 
     def test_investigation_shape_carries_the_investigation_label(self):
         call = self._create_call_for("investigation", "A brand new investigation")
-        self.assertIn("investigation", call)
+        self.assertIn("labels[]=investigation", call)
 
     def test_work_shape_still_carries_the_work_label(self):
         call = self._create_call_for("work", "A brand new distinct piece of work")
-        self.assertIn("work", call)
+        self.assertIn("labels[]=work", call)
 
 
 class ParentingRule(unittest.TestCase):
@@ -529,7 +508,7 @@ class ParentingRule(unittest.TestCase):
         out = r.stdout + r.stderr
         self.assertIn("--parent", out)
         self.assertIn("docs/plans/", out)
-        self.assertFalse(h.called("issue", "create", "--title"))
+        self.assertFalse(h.created())
 
     def test_plan_derived_body_accepts_a_parent(self):
         h = Harness("Some body.\n\n" + PLAN_DESIGN + "\n")
@@ -557,7 +536,7 @@ class NeighbourCheck(unittest.TestCase):
         self.assertIn("103", r.stdout)
         self.assertIn("104", r.stdout)
         self.assertIn("105", r.stdout)
-        self.assertFalse(h.called("issue", "create", "--title"))
+        self.assertFalse(h.created())
 
     def test_near_duplicate_title_is_reported_prominently(self):
         h = Harness("**Design:** none\n")
@@ -579,11 +558,8 @@ class NeighbourCheck(unittest.TestCase):
         r = h.run(*full_args(h.body_file), "--no-parent", "--top", "--dry-run")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("board", (r.stdout + r.stderr).lower())
-        self.assertFalse(h.called("issue", "create", "--title"))
+        self.assertFalse(h.created())
 
-
-
-NEW_URL = "https://github.com/jffriend/photo-consolidation/issues/200\n"
 
 
 PRE_BOARD = [
@@ -593,37 +569,74 @@ PRE_BOARD = [
 ]
 
 
+# The REST board-half calls, as the fake matches them. Item-add is `POST
+# users/{owner}/projectsV2/{n}/items -f type=Issue -F id=<issue id>`; its rule
+# must come BEFORE the generic `-X POST` rule, which it also matches. The
+# single-item read the read-back corroborates with is `GET .../items/<id>`,
+# and nothing else carries `/items/`: the listing is `items?per_page=`.
+ITEM_ADD_MATCH = "items -f type=Issue"
+ITEM_READ_MATCH = "/items/"
+# The position write is the one GraphQL call left (#14 KTD2).
+POSITION_MATCH = "updateProjectV2ItemPosition"
+
+
+def item_reply(n, node_id=None):
+    """A REST project item. Every item the fake's board listing carries has
+    numeric id 900000 + its issue number and node id PVTI_<number> (see
+    board_page); item-add answers in the same shape."""
+    return {"id": 900000 + int(n), "node_id": node_id or "PVTI_%d" % int(n),
+            "content_type": "Issue", "content": {"number": int(n)}}
+
+
+def item_read_rule(corroborate):
+    """The read-back's single-item read: the item when `corroborate` is
+    truthy, a 404 otherwise -- the corroborating read agrees it is absent."""
+    if corroborate:
+        return {"match": ITEM_READ_MATCH, "stdout": json.dumps(item_reply(200))}
+    return {"match": ITEM_READ_MATCH, "exit": 1,
+            "stderr": "gh: Not Found (HTTP 404)\n"}
+
+
+# The relationship read-back's three REST reads of #200 (#14 KTD6). The two
+# dependency lists come before the bare issue read, which is a substring of
+# both.
+READ_BLOCKED_MATCH = "issues/200/dependencies/blocked_by?"
+READ_BLOCKING_MATCH = "issues/200/dependencies/blocking?"
+READ_ISSUE_MATCH = "issues/200"
+
+
+def dependency_list(numbers):
+    """`GET .../dependencies/blocked_by` or `/blocking`: an array of issues."""
+    return json.dumps([{"number": int(n), "id": issue_id(n)} for n in numbers])
+
+
 def create_responses(blocked_by, blocking, parent=None, corroborate=""):
     """Canned replies for the create-and-read-back half.
 
-    The read-back rule keys on `--json parent,blockedBy,blocking`, never on a
-    bare `parent`/`blocked-by`/`blocking` token: those words now appear in the
-    `gh issue create` argv too.
+    The issue create is `POST repos/{repo}/issues` with its title as the first
+    field, so `issues -f title=` matches it and nothing else. Item-add is
+    answered next, then every other write -- the sub-issue and dependency
+    POSTs -- by the generic `-X POST` rule, which must come before the issue
+    reads at the end: `issues/55` is a substring of `issues/55/sub_issues`.
 
-    `corroborate` is the item id the single-issue project-items read returns
-    when the board LISTING does not show the issue. Empty by default -- the
-    corroborating read agrees the issue is not there -- so every existing
-    assertion here is unchanged. Its rule must come BEFORE the generic
-    `projectItems` rule, whose substring the corroborating call also carries.
+    The read-back is three REST reads of #200: the issue (its parent) and its
+    two dependency lists.
+
+    `corroborate` makes the single-item read return the item when the board
+    LISTING does not show the issue. Empty by default -- the corroborating
+    read agrees the issue is not there.
     """
     return [
-        {"match": "issue create", "stdout": NEW_URL},
-        {"match": "item-add", "stdout": json.dumps({"id": "PVTI_new"})},
-        {"match": "boardMembershipCorroboration",
-         "stdout": (corroborate + "\n") if corroborate else ""},
-        {"match": "projectItems", "stdout": "PVTI_after\n"},
-        {"match": "updateProjectV2ItemPosition", "stdout": json.dumps({"data": {}})},
-        {"match": "--json parent,blockedBy,blocking", "stdout": json.dumps({
-            "parent": ({"number": int(parent)} if parent else None),
-            "blockedBy": {
-                "nodes": [{"number": n} for n in blocked_by],
-                "totalCount": len(blocked_by),
-            },
-            "blocking": {
-                "nodes": [{"number": n} for n in blocking],
-                "totalCount": len(blocking),
-            },
-        })},
+        {"match": "issues -f title=", "stdout": json.dumps(issue_reply(200))},
+        {"match": ITEM_ADD_MATCH, "stdout": json.dumps(item_reply(200))},
+        {"match": "-X POST", "stdout": "{}"},
+        {"match": POSITION_MATCH, "stdout": json.dumps({"data": {}})},
+        item_read_rule(corroborate),
+        {"match": READ_BLOCKED_MATCH, "stdout": dependency_list(blocked_by)},
+        {"match": READ_BLOCKING_MATCH, "stdout": dependency_list(blocking)},
+        {"match": READ_ISSUE_MATCH,
+         "stdout": json.dumps(issue_reply(200, parent=parent))},
+        *referenced_issue_rules(),
     ]
 
 
@@ -664,7 +677,7 @@ class NoPromptOneRun(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("POSSIBLE DUPLICATES: none found", r.stdout)
         self.assertIn("READ-BACK", r.stdout)
-        self.assertTrue(h.called("issue", "create", "--title"))
+        self.assertTrue(h.created())
 
     def test_stdin_is_ignored(self):
         # An `n` that the old prompt would have read as "no" changes nothing.
@@ -672,7 +685,7 @@ class NoPromptOneRun(unittest.TestCase):
         r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101",
                   stdin="n\n")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertTrue(h.called("issue", "create", "--title"))
+        self.assertTrue(h.created())
 
     def test_possible_duplicates_stop_before_any_write_with_exit_3(self):
         h = self._harness(DUPE_PRE_BOARD, DUPE_POST_BOARD)
@@ -684,8 +697,8 @@ class NoPromptOneRun(unittest.TestCase):
         self.assertIn("ABOUT TO CREATE", r.stdout)
         self.assertIn("Nothing was created", r.stderr)
         self.assertIn("--file-anyway", r.stderr)
-        self.assertFalse(h.called("issue", "create", "--title"))
-        self.assertFalse(h.called("item-add"))
+        self.assertFalse(h.created())
+        self.assertFalse(h.called(ITEM_ADD_MATCH))
 
     def test_file_anyway_files_past_possible_duplicates(self):
         h = self._harness(DUPE_PRE_BOARD, DUPE_POST_BOARD)
@@ -694,7 +707,7 @@ class NoPromptOneRun(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("164", r.stdout)
         self.assertIn("READ-BACK", r.stdout)
-        self.assertTrue(h.called("issue", "create", "--title"))
+        self.assertTrue(h.created())
 
     def test_a_failed_duplicate_check_stops_rather_than_reading_as_none(self):
         # With no prompt, DUPES is the stop's only input. A listing the
@@ -702,25 +715,61 @@ class NoPromptOneRun(unittest.TestCase):
         h = self._harness()
         table = json.loads((h.dir / "responses.json").read_text())
         for rule in table:
-            if rule.get("match") == "issue list":
-                rule["stdout"] = "not json"
+            if rule.get("match") == TITLES_MATCH:
+                rule["stdouts"] = ["not json"]
         (h.dir / "responses.json").write_text(json.dumps(table))
         r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("duplicate check failed", r.stderr)
         self.assertNotIn("POSSIBLE DUPLICATES: none found", r.stdout)
-        self.assertFalse(h.called("issue", "create", "--title"))
+        self.assertFalse(h.created())
 
-    def _harness_with_open_issue_count(self, count):
+    def _harness_with_listing(self, entries):
         h = self._harness()
-        titles = [{"number": 1000 + i, "title": f"Unrelated open issue {i}"}
-                  for i in range(count)]
         table = json.loads((h.dir / "responses.json").read_text())
         for rule in table:
-            if rule.get("match") == "issue list":
-                rule["stdout"] = json.dumps(titles)
+            if rule.get("match") == TITLES_MATCH:
+                rule["stdouts"] = titles_pages(entries)
         (h.dir / "responses.json").write_text(json.dumps(table))
         return h
+
+    def _harness_with_open_issue_count(self, count):
+        return self._harness_with_listing(
+            [{"number": 1000 + i, "title": f"Unrelated open issue {i}"}
+             for i in range(count)])
+
+    @staticmethod
+    def _listing_calls(h):
+        return [c for c in h.calls() if any(TITLES_MATCH in a for a in c)]
+
+    def test_a_pull_request_with_a_matching_title_is_not_a_duplicate(self):
+        # The REST listing of open issues includes pull requests. A PR is not
+        # an issue a new one could duplicate, so it never reaches the check.
+        h = self._harness_with_listing([
+            {"number": 300, "title": DUPE_TITLE,
+             "pull_request": {"url": "https://api.github.com/repos/x/y/pulls/300"}},
+            {"number": 101, "title": "First thing on the board"},
+        ])
+        r = h.run(*full_args(h.body_file, **{"--title": DUPE_TITLE}),
+                  "--no-parent", "--after", "101")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("POSSIBLE DUPLICATES: none found", r.stdout)
+        self.assertNotIn("#300", r.stdout)
+        self.assertTrue(h.created())
+
+    def test_an_issue_with_a_matching_title_on_page_two_is_found(self):
+        entries = [{"number": 1000 + i, "title": f"Unrelated open issue {i}"}
+                   for i in range(100)]
+        entries.append({"number": 164, "title":
+                        "Run: re-sort the library into YYYY/MM once the dates are final"})
+        h = self._harness_with_listing(entries)
+        r = h.run(*full_args(h.body_file, **{"--title": DUPE_TITLE}),
+                  "--no-parent", "--after", "101")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("164", r.stdout)
+        calls = self._listing_calls(h)
+        self.assertEqual(2, len(calls), calls)
+        self.assertIn("page=2", " ".join(calls[1]))
 
     def test_a_listing_at_the_limit_warns_that_matches_may_be_missed(self):
         # Issue #17: the check reads at most 500 open issues. A full listing
@@ -730,7 +779,23 @@ class NoPromptOneRun(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("WARNING: the duplicate check read only the first 500",
                       r.stdout)
-        self.assertTrue(h.called("issue", "create", "--title"))
+        self.assertTrue(h.created())
+
+    def test_the_limit_counts_pull_requests_because_they_fill_the_same_pages(self):
+        # 500 raw entries, 100 of them pull requests: only 400 issues were
+        # checked, and the listing still stopped at the limit with more
+        # possibly unread.
+        entries = [{"number": 1000 + i, "title": f"Unrelated open issue {i}"}
+                   for i in range(400)]
+        entries += [{"number": 2000 + i, "title": f"A pull request {i}",
+                     "pull_request": {"url": "x"}} for i in range(100)]
+        h = self._harness_with_listing(entries)
+        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("WARNING: the duplicate check read only the first 500",
+                      r.stdout)
+        self.assertEqual(5, len(self._listing_calls(h)),
+                         "the listing stops at the limit")
 
     def test_a_listing_under_the_limit_does_not_warn(self):
         h = self._harness_with_open_issue_count(499)
@@ -745,7 +810,7 @@ class NoPromptOneRun(unittest.TestCase):
                   "--no-parent", "--after", "101", "--dry-run")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("164", r.stdout)
-        self.assertFalse(h.called("issue", "create", "--title"))
+        self.assertFalse(h.created())
 
 
 class ReadBack(unittest.TestCase):
@@ -772,7 +837,7 @@ class ReadBack(unittest.TestCase):
         h = self._harness()
         r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertTrue(h.called("issue", "create", "--title"))
+        self.assertTrue(h.created())
 
     def test_happy_path_with_a_parent_and_both_directions(self):
         """All five comparisons on NON-EMPTY answers.
@@ -847,13 +912,12 @@ class ReadBack(unittest.TestCase):
         # A board with GitHub's auto-add workflow puts the new issue on it
         # before item-add runs, and item-add then refuses with "Content
         # already exists in this project". pluckd #504 and #508 both came back
-        # HALF-WIRED this way. The id must come from the by-number lookup.
-        responses = create_responses([], [])
-        responses[1] = {"match": "item-add", "exit": 1, "stderr":
-                        "GraphQL: Content already exists in this project "
-                        "(addProjectV2ItemById)\n"}
-        responses.insert(2, {"match": "boardItemByIssueNumber",
-                             "stdout": "PVTI_auto_added\n"})
+        # HALF-WIRED this way. The id must come from the board listing, re-read
+        # after item-add fails, since the pre-write listing predates the issue
+        # (#14 KTD5).
+        responses = override(create_responses([], []), ITEM_ADD_MATCH, exit=1,
+                             stderr="gh: Content already exists in this "
+                                    "project (HTTP 422)\n")
         h = Harness(
             "**Design:** none\n",
             boards=[PRE_BOARD, [
@@ -869,7 +933,8 @@ class ReadBack(unittest.TestCase):
         positions = [c for c in h.calls()
                      if any("updateProjectV2ItemPosition" in a for a in c)]
         self.assertEqual(1, len(positions), positions)
-        self.assertIn("PVTI_auto_added", " ".join(positions[0]))
+        self.assertIn("i=PVTI_200", positions[0],
+                      "the node id the re-read listing carries for #200")
         self.assertIn("board position     ok (after #101)", r.stdout)
 
     def test_missing_from_the_board_fails_loudly(self):
@@ -915,14 +980,10 @@ def path_without_gh():
 
 class CapabilityProbe(unittest.TestCase):
     """
-    `gh` 2.94.0 replaced the node-id lookups this script used to hand-roll with
-    native flags. The script now uses those flags, so it must establish they
-    exist BEFORE it writes anything -- discovering an absent flag mid-write is
-    what leaves a half-wired issue behind.
-
-    The probe resolves to four states, never a boolean: not installed, absent,
-    undeterminable, present. A probe that could not run is not a probe that
-    passed.
+    #14 KTD7: every GitHub call now goes through `gh api`, so the probe no
+    longer reads `gh issue create/edit --help` or `gh issue view --json` for
+    flags and fields the engine does not use. It refuses only when `gh` is not
+    on PATH, and prints the installed version for the record.
     """
 
     ARGS_TAIL = ("--no-parent", "--top", "--dry-run")
@@ -932,48 +993,15 @@ class CapabilityProbe(unittest.TestCase):
         r = h.run(*full_args(h.body_file), *self.ARGS_TAIL, path=path)
         return h, r, r.stdout + r.stderr
 
-    def test_help_missing_the_flags_refuses_before_any_network_call(self):
-        h, r, out = self._run(probe_rules(flag_lines=""))
-        self.assertNotEqual(r.returncode, 0, out)
-        self.assertIn("MISSING CAPABILITY", out)
-        for flag in ("--parent", "--blocked-by", "--blocking"):
-            self.assertIn(flag, out, "must name which flag is missing")
-        self.assertIn("2.98.0", out, "must report the installed version")
-        self.assertIn("brew upgrade gh", out, "must name the upgrade action")
-        self.assertEqual([], h.network_calls(),
-                         "the refusal must land before any network call")
-
-    def test_help_with_all_the_flags_proceeds(self):
+    def test_a_fake_with_no_flag_probe_answers_proceeds(self):
+        # The fake answers only `--version`; a `--help` or bare
+        # `issue view --json` call would get `{}` back and refuse.
         h, r, out = self._run(probe_rules())
         self.assertEqual(r.returncode, 0, out)
-        self.assertNotIn("MISSING CAPABILITY", out)
-        self.assertNotIn("UNDETERMINABLE CAPABILITY", out)
-        self.assertIn("2.98.0", r.stdout)
-
-    def test_help_unreadable_refuses_as_undeterminable(self):
-        h, r, out = self._run(probe_rules(help_text="", help_exit=1))
-        self.assertNotEqual(r.returncode, 0, out)
-        self.assertIn("UNDETERMINABLE CAPABILITY", out)
-        self.assertIn("gh issue create --help", out,
-                      "must print the invocation whose output could not be read")
-        self.assertIn("2.98.0", out, "must print the version or its sentinel")
-        self.assertIn("gh issue create --help", out)
-        self.assertEqual([], h.network_calls())
-
-    def test_undeterminable_wording_is_distinct_from_absent_wording(self):
-        _, _, absent = self._run(probe_rules(flag_lines=""))
-        _, _, undet = self._run(probe_rules(help_text="", help_exit=1))
-        self.assertIn("MISSING CAPABILITY", absent)
-        self.assertNotIn("UNDETERMINABLE CAPABILITY", absent)
-        self.assertIn("UNDETERMINABLE CAPABILITY", undet)
-        self.assertNotIn("MISSING CAPABILITY", undet)
-
-    def test_examples_naming_the_flags_do_not_satisfy_the_probe(self):
-        # The real `gh issue create --help` names `--parent` three times, twice
-        # outside the FLAGS block. Anchoring is what makes this refuse.
-        h, r, out = self._run(probe_rules(flag_lines=""))
-        self.assertNotEqual(r.returncode, 0, out)
-        self.assertIn("MISSING CAPABILITY", out)
+        self.assertIn("2.98.0", r.stdout, "the version is still printed")
+        for call in h.calls():
+            self.assertNotIn("--help", call, call)
+            self.assertNotEqual(["issue", "view", "--json"], call[:3], call)
 
     def test_unparseable_version_still_proceeds_and_prints_the_sentinel(self):
         h, r, out = self._run(probe_rules(version_line="gh, but which one?\n"))
@@ -981,121 +1009,157 @@ class CapabilityProbe(unittest.TestCase):
         self.assertIn("unknown", r.stdout,
                       "the sentinel prints where the version would go")
 
-    def test_missing_json_field_refuses_with_the_absent_wording(self):
-        fields = tuple(f for f in JSON_FIELDS if f != "blockedBy")
-        h, r, out = self._run(probe_rules(fields=fields))
-        self.assertNotEqual(r.returncode, 0, out)
-        self.assertIn("MISSING CAPABILITY", out)
-        self.assertIn("blockedBy", out)
-        self.assertEqual([], h.network_calls())
-
-    def test_unreadable_json_field_list_is_undeterminable(self):
-        h, r, out = self._run(probe_rules(fields_text="", fields_exit=1))
-        self.assertNotEqual(r.returncode, 0, out)
-        self.assertIn("UNDETERMINABLE CAPABILITY", out)
-        self.assertIn("gh issue view --json", out)
-
-    def test_a_nonzero_exit_from_the_field_list_is_not_undeterminable(self):
-        # Bare `gh issue view --json` exits 1 on a healthy gh. Reading that as
-        # a failure would refuse every run.
-        h, r, out = self._run(probe_rules(fields_exit=1))
-        self.assertEqual(r.returncode, 0, out)
-
     def test_gh_absent_from_path_refuses_saying_so(self):
         h, r, out = self._run(probe_rules(), path=path_without_gh())
         self.assertNotEqual(r.returncode, 0, out)
         self.assertIn("REFUSED: gh is not on PATH", out)
-        self.assertNotIn("MISSING CAPABILITY", out)
-        self.assertNotIn("UNDETERMINABLE CAPABILITY", out)
+        self.assertEqual([], h.calls())
 
 
-class NativeWritePath(unittest.TestCase):
+class RestWritePath(unittest.TestCase):
     """
-    Parent and both blocking directions are set by the same call that creates
-    the issue, through gh's own flags. No node id is resolved anywhere.
+    #14 U3: create writes over REST. The issue is one POST; then the parent is
+    one sub_issues POST and each blocking link one dependencies POST, each
+    carrying a numeric issue `id` -- the parent link and every blocks link the
+    NEW issue's, every blocked-by link the blocker's. Every referenced issue
+    is read for its id before anything is written (KTD3).
     """
 
-    def _create_argv(self, h):
-        for call in h.calls():
-            if "--help" in call:
-                continue
-            if call[:2] == ["issue", "create"]:
-                return call
-        return None
+    BOARD_AFTER = [
+        (101, "First thing on the board"),
+        (200, "A brand new distinct piece of work"),
+        (102, "Second thing"),
+    ]
 
-    def test_create_call_carries_all_three_flags(self):
-        board_after = [
-            (101, "First thing on the board"),
-            (200, "A brand new distinct piece of work"),
-            (102, "Second thing"),
-        ]
+    def _run(self, *args, responses=None, blocked=(), blocking=(), parent=None):
         h = Harness(
             "**Design:** none\n",
-            boards=[PRE_BOARD, board_after],
-            responses=create_responses([122], [63], "55"),
+            boards=[PRE_BOARD, self.BOARD_AFTER],
+            responses=(responses if responses is not None else
+                       create_responses(list(blocked), list(blocking), parent)),
         )
-        r = h.run(
-            "--title", "A brand new distinct piece of work",
-            "--body-file", str(h.body_file), "--shape", "work",
-            "--parent", "55", "--after", "101",
-            "--blocked-by", "122", "--blocks", "63",
-        )
+        return h, h.run("--title", "A brand new distinct piece of work",
+                        "--body-file", str(h.body_file), "--shape", "work",
+                        *args)
+
+    def test_parent_two_blockers_and_one_blocked_issue_are_five_writes(self):
+        h, r = self._run("--parent", "55", "--after", "101",
+                         "--blocked-by", "122,133", "--blocks", "63",
+                         blocked=[122, 133], blocking=[63], parent="55")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        argv = self._create_argv(h)
-        self.assertIsNotNone(argv, "a real create must have been issued")
-        self.assertIn("--parent", argv)
-        self.assertEqual("55", argv[argv.index("--parent") + 1])
-        self.assertIn("--blocked-by", argv)
-        self.assertEqual("122", argv[argv.index("--blocked-by") + 1])
-        self.assertIn("--blocking", argv)
-        self.assertEqual("63", argv[argv.index("--blocking") + 1])
-        self.assertFalse(h.called("sub_issues"))
-        self.assertFalse(h.called("dependencies"))
+        self.assertEqual(1, len(h.create_posts()), h.calls())
+        self.assertEqual(sorted([
+            ("55/sub_issues", "sub_issue_id=%d" % issue_id(200)),
+            ("200/dependencies/blocked_by", "issue_id=%d" % issue_id(122)),
+            ("200/dependencies/blocked_by", "issue_id=%d" % issue_id(133)),
+            ("63/dependencies/blocked_by", "issue_id=%d" % issue_id(200)),
+        ]), sorted(link_writes(h)))
+        self.assertIn("parent             ok (#55)", r.stdout)
+        self.assertIn("blocked-by         ok (122,133)", r.stdout)
+        self.assertIn("blocks             ok (63)", r.stdout)
 
-    def test_none_answers_omit_the_flags_rather_than_passing_them_empty(self):
-        board_after = [
-            (101, "First thing on the board"),
-            (200, "A brand new distinct piece of work"),
-            (102, "Second thing"),
-        ]
-        h = Harness(
-            "**Design:** none\n",
-            boards=[PRE_BOARD, board_after],
-            responses=create_responses([], [], None),
-        )
-        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
+    def test_every_link_is_written_after_the_issue_and_every_read_before_it(self):
+        h, r = self._run("--parent", "55", "--after", "101",
+                         "--blocked-by", "122", "--blocks", "63",
+                         blocked=[122], blocking=[63], parent="55")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        argv = self._create_argv(h)
-        self.assertIsNotNone(argv)
-        for flag in ("--parent", "--blocked-by", "--blocking"):
-            self.assertNotIn(flag, argv,
-                             "an unanswered relationship is an OMITTED flag, "
-                             "never an empty one")
+        calls = h.calls()
+        create_at = calls.index(h.create_posts()[0])
+        for n in (55, 122, 63):
+            reads = [i for i, c in enumerate(calls)
+                     if c == ["api", "repos/jffriend/photo-consolidation/issues/%d" % n]]
+            self.assertEqual(1, len(reads), "#%d is read once for its id" % n)
+            self.assertLess(reads[0], create_at)
+        for i, c in enumerate(calls):
+            if c[:3] == ["api", "-X", "POST"] and i != create_at:
+                self.assertGreater(i, create_at, c)
 
-    def test_no_call_resolves_an_issue_node_id(self):
-        board_after = [
-            (101, "First thing on the board"),
-            (200, "A brand new distinct piece of work"),
-            (102, "Second thing"),
-        ]
-        h = Harness(
-            "**Design:** none\n",
-            boards=[PRE_BOARD, board_after],
-            responses=create_responses([122], [63], "55"),
-        )
-        h.run(
-            "--title", "A brand new distinct piece of work",
-            "--body-file", str(h.body_file), "--shape", "work",
-            "--parent", "55", "--after", "101",
-            "--blocked-by", "122", "--blocks", "63",
-        )
+    def test_the_create_carries_title_body_and_labels(self):
+        h, r = self._run("--no-parent", "--after", "101",
+                         "--blocked-by", "none", "--blocks", "none")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        argv = h.create_posts()[0]
+        self.assertEqual("repos/jffriend/photo-consolidation/issues", argv[3])
+        self.assertIn("title=A brand new distinct piece of work", argv)
+        self.assertIn("body=@%s" % h.body_file, argv)
+        self.assertIn("labels[]=work", argv)
+
+    def test_none_answers_write_no_link_at_all(self):
+        h, r = self._run("--no-parent", "--after", "101",
+                         "--blocked-by", "none", "--blocks", "none")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual([], link_writes(h),
+                         "an unanswered relationship is no write, never an empty one")
+
+    def test_a_blocker_that_does_not_exist_refuses_before_the_create(self):
+        responses = [{"match": "issues/999", "exit": 1,
+                      "stderr": "gh: Not Found (HTTP 404)\n"}] \
+            + create_responses([], [])
+        h, r = self._run("--no-parent", "--after", "101",
+                         "--blocked-by", "999", "--blocks", "none",
+                         responses=responses)
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        self.assertIn("#999 does not exist", r.stderr)
+        self.assertIn("Nothing was created.", r.stderr)
+        self.assertFalse(h.created())
+        self.assertTrue(wrote_nothing(h))
+
+    def test_a_blocker_that_cannot_be_read_refuses_without_saying_it_is_missing(self):
+        responses = [{"match": "issues/122", "exit": 1,
+                      "stderr": "gh: Server Error (HTTP 502)\n"}] \
+            + create_responses([], [])
+        h, r = self._run("--no-parent", "--after", "101",
+                         "--blocked-by", "122", "--blocks", "none",
+                         responses=responses)
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        self.assertIn("#122 could not be read", r.stderr)
+        self.assertNotIn("does not exist", r.stderr)
+        self.assertIn("Nothing was created.", r.stderr)
+        self.assertTrue(wrote_nothing(h))
+
+    def test_a_failed_link_write_warns_and_the_read_back_refuses(self):
+        responses = [{"match": "-X POST repos/jffriend/photo-consolidation/"
+                               "issues/200/dependencies/blocked_by",
+                      "exit": 1, "stderr": "gh: Validation Failed (HTTP 422)\n"}] \
+            + create_responses([], [])
+        h, r = self._run("--no-parent", "--after", "101",
+                         "--blocked-by", "122", "--blocks", "none",
+                         responses=responses)
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        err = r.stderr
+        self.assertIn("WARNING", err)
+        self.assertIn("HTTP 422", err, "gh's own reason reaches the operator")
+        self.assertIn("MISMATCH: blocked-by", err)
+        self.assertTrue(h.called("updateProjectV2ItemPosition"),
+                        "a failed link does not stop the run before the read-back")
+        lines = err.splitlines()
+        finish = [i for i, ln in enumerate(lines) if ln.startswith("Finish it")]
+        self.assertEqual(1, len(finish), err)
+        command = lines[finish[0] + 1]
+        self.assertEqual(
+            "  bash %s --config %s --adopt 200 --no-parent --after 101 "
+            "--blocked-by 122 --blocks none" % (FILE_ISSUE, h.config_path),
+            command, "the remedy leads with the runnable adopt command")
+        tail = "\n".join(lines[finish[0] + 2:])
+        self.assertIn("delete #200 and re-run", tail)
+        self.assertIn("local session", tail)
+        self.assertNotIn("delete", "\n".join(lines[:finish[0] + 2])
+                         .replace("Do not delete", ""))
+
+    def test_no_create_goes_through_gh_issue_or_graphql(self):
+        h, r = self._run("--parent", "55", "--after", "101",
+                         "--blocked-by", "122", "--blocks", "63",
+                         blocked=[122], blocking=[63], parent="55")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         for call in h.calls():
             joined = " ".join(call)
-            self.assertNotIn("--jq .id", joined)
-            self.assertNotIn("sub_issues", joined)
-            self.assertNotIn("dependencies/", joined)
+            self.assertNotEqual(["issue", "create"], call[:2], call)
+            self.assertNotEqual(["issue", "list"], call[:2], call)
+            if "graphql" in joined:
+                # The position write is the only call left on GraphQL.
+                self.assertIn(POSITION_MATCH, joined, call)
 
-    def test_the_relationship_read_back_is_one_call(self):
+    def test_the_relationship_read_back_is_three_rest_reads(self):
         board_after = [
             (101, "First thing on the board"),
             (200, "A brand new distinct piece of work"),
@@ -1113,12 +1177,12 @@ class NativeWritePath(unittest.TestCase):
             "--blocked-by", "122", "--blocks", "63",
         )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        views = [c for c in h.calls()
-                 if c[:2] == ["issue", "view"] and "--help" not in c
-                 and c[2:3] != ["--json"]]
-        self.assertEqual(1, len(views), views)
-        self.assertIn("--json", views[0])
-        self.assertIn("parent,blockedBy,blocking", views[0])
+        base = "repos/jffriend/photo-consolidation/issues/200"
+        for path in (base, base + "/dependencies/blocked_by?per_page=100",
+                     base + "/dependencies/blocking?per_page=100"):
+            reads = [c for c in h.calls() if c == ["api", path]]
+            self.assertEqual(1, len(reads), (path, h.calls()))
+        self.assertFalse([c for c in h.calls() if c[:2] == ["issue", "view"]])
 
 
 # ---------------------------------------------------------------------------
@@ -1145,54 +1209,45 @@ ADOPT_POST_BOARD = [
 ]
 
 
-def rel_json(parent=None, blocked_by=(), blocking=()):
-    return {
-        "parent": ({"number": int(parent)} if parent else None),
-        "blockedBy": {"nodes": [{"number": int(n)} for n in blocked_by],
-                      "totalCount": len(blocked_by)},
-        "blocking": {"nodes": [{"number": int(n)} for n in blocking],
-                     "totalCount": len(blocking)},
-    }
-
-
 def adopt_responses(pre_parent=None, pre_blocked=(), pre_blocking=(),
                     post_parent=None, post_blocked=(), post_blocking=(),
-                    state="OPEN", body="**Design:** none\n",
-                    view_exit=0, view_stdout=None,
-                    edit_exit=0, item_by_number="PVTI_adopt",
-                    corroborate=""):
+                    state="open", body="**Design:** none\n",
+                    issue_stdout=None, write_exit=0,
+                    corroborate="", blocked_stdout=None):
     """Canned replies for an adopt run.
 
-    The PRE-FETCH and the READ-BACK are two different `gh issue view` calls and
-    they must be answerable differently -- the pre-fetch has to show no
-    conflicting links or the KD2 refusal fires, while the read-back has to show
-    the links just written. They are told apart by their `--json` field lists,
-    and the pre-fetch rule comes FIRST because its field list contains the
-    read-back's as a substring.
+    The PRE-FETCH and the READ-BACK read the same three REST paths -- the
+    issue and its two dependency lists -- so each rule answers its FIRST call
+    with the pre-write state and every later one with the post-write state.
+    They must differ: the pre-fetch has to show no conflicting links or the
+    KD2 refusal fires, while the read-back has to show the links just written.
+
+    ORDER MATTERS, because the fake matches substrings. Item-add comes first,
+    since it also carries `-X POST`; then the `-X POST` rule, since every
+    write's path also names an issue a read rule matches. The two
+    dependency-list reads come before the bare issue read `issues/200`, which
+    is a substring of both.
     """
-    pre = dict(rel_json(pre_parent, pre_blocked, pre_blocking))
-    pre["state"] = state
-    pre["body"] = body
-    if view_stdout is None:
-        view_stdout = json.dumps(pre)
+    if issue_stdout is None:
+        issue_stdout = json.dumps(issue_reply(ADOPT_NUM, state=state, body=body,
+                                              parent=pre_parent))
+    if blocked_stdout is None:
+        blocked_stdout = dependency_list(pre_blocked)
     return [
-        {"match": "--json state,body,parent,blockedBy,blocking",
-         "stdout": view_stdout, "exit": view_exit},
-        # The by-issue-number item lookup carries a marker literal in its
-        # GraphQL text. Without it the generic `projectItems` rule below would
-        # hand adopt the `--after` item's id and the test would prove nothing.
-        {"match": "boardItemByIssueNumber",
-         "stdout": (item_by_number + "\n") if item_by_number else ""},
-        # The read-back's corroborating single-issue read. Same store, its own
-        # marker, so it is answerable separately from both lookups above.
-        {"match": "boardMembershipCorroboration",
-         "stdout": (corroborate + "\n") if corroborate else ""},
-        {"match": "projectItems", "stdout": "PVTI_after\n"},
-        {"match": "item-add", "stdout": json.dumps({"id": "PVTI_from_item_add"})},
-        {"match": "issue edit", "stdout": "", "exit": edit_exit},
-        {"match": "updateProjectV2ItemPosition", "stdout": json.dumps({"data": {}})},
-        {"match": "--json parent,blockedBy,blocking",
-         "stdout": json.dumps(rel_json(post_parent, post_blocked, post_blocking))},
+        {"match": ITEM_ADD_MATCH,
+         "stdout": json.dumps(item_reply(200, node_id="PVTI_from_item_add"))},
+        {"match": "-X POST", "stdout": "{}", "exit": write_exit},
+        {"match": POSITION_MATCH, "stdout": json.dumps({"data": {}})},
+        item_read_rule(corroborate),
+        {"match": READ_BLOCKED_MATCH,
+         "stdouts": [blocked_stdout, dependency_list(post_blocked)]},
+        {"match": READ_BLOCKING_MATCH,
+         "stdouts": [dependency_list(pre_blocking), dependency_list(post_blocking)]},
+        {"match": READ_ISSUE_MATCH,
+         "stdouts": [issue_stdout,
+                     json.dumps(issue_reply(ADOPT_NUM, state=state, body=body,
+                                            parent=post_parent))]},
+        *referenced_issue_rules(),
     ]
 
 
@@ -1214,34 +1269,43 @@ def adopt_args(num=ADOPT_NUM, **over):
     return out
 
 
-def edit_argv(h):
-    """The one real `gh issue edit` argv, or None."""
+def link_writes(h):
+    """Every relationship write, as (path after `/issues/`, its id field).
+
+    `("55/sub_issues", "sub_issue_id=7000200")` puts #200 under #55;
+    `("200/dependencies/blocked_by", "issue_id=7000122")` makes #200 blocked
+    by #122.
+    """
+    out = []
     for call in h.calls():
-        if "--help" in call:
+        if call[:3] != ["api", "-X", "POST"] or len(call) < 4:
             continue
-        if call[:2] == ["issue", "edit"]:
-            return call
-    return None
+        path = call[3]
+        if "/sub_issues" in path or "/dependencies/" in path:
+            fields = [a for a in call[4:] if "_id=" in a]
+            out.append((path.split("/issues/", 1)[1],
+                        fields[0] if fields else ""))
+    return out
 
 
 def create_argv(h):
-    for call in h.calls():
-        if "--help" in call:
-            continue
-        if call[:2] == ["issue", "create"]:
-            return call
-    return None
+    posts = h.create_posts()
+    return posts[0] if posts else None
+
+
+WRITE_METHODS = ("POST", "PATCH", "PUT", "DELETE")
 
 
 def wrote_nothing(h):
     """True when no call in this run changed anything on the server."""
     for call in h.calls():
-        if "--help" in call:
-            continue
         joined = " ".join(call)
         if call[:2] in (["issue", "edit"], ["issue", "create"]):
             return False
-        if "item-add" in joined or "updateProjectV2ItemPosition" in joined:
+        if call[:1] == ["api"] and "-X" in call \
+                and call[call.index("-X") + 1] in WRITE_METHODS:
+            return False
+        if POSITION_MATCH in joined:
             return False
     return True
 
@@ -1304,18 +1368,62 @@ class AdoptGate(unittest.TestCase):
         self.assertEqual([], h.network_calls())
 
     def test_a_nonexistent_issue_refuses_before_any_write(self):
-        h = adopt_harness(view_stdout="", view_exit=1)
+        h = Harness("**Design:** none\n",
+                    responses=[{"match": "issues/999", "exit": 1,
+                                "stderr": "gh: Not Found (HTTP 404)\n"}]
+                    + adopt_responses())
         r = h.run(*adopt_args(num="999"), "--no-parent", "--top")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("999", r.stdout + r.stderr)
         self.assertTrue(wrote_nothing(h))
 
     def test_a_closed_issue_refuses_before_any_write(self):
-        h = adopt_harness(state="CLOSED")
+        # REST spells the state in lower case.
+        h = adopt_harness(state="closed")
         r = h.run(*adopt_args(), "--no-parent", "--top")
         self.assertNotEqual(r.returncode, 0)
         out = r.stdout + r.stderr
-        self.assertIn("CLOSED", out)
+        self.assertIn("is closed, not open", out)
+        self.assertTrue(wrote_nothing(h))
+
+    def test_a_parentless_issue_has_no_parent_key_and_reads_as_no_parent(self):
+        # GitHub OMITS parent_issue_url on a parentless issue (measured
+        # 2026-10-15). Absent is a legal answer, so adopt must read it as "no
+        # parent" and write the one asked for.
+        h = adopt_harness(post_parent="55")
+        self.assertNotIn("parent_issue_url",
+                         issue_reply(ADOPT_NUM), "precondition: key absent")
+        r = h.run(*adopt_args(), "--parent", "55", "--after", "101")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual([("55/sub_issues", "sub_issue_id=%d" % issue_id(200))],
+                         link_writes(h))
+
+    def test_an_issue_reply_without_number_and_state_refuses(self):
+        # {"message": ...} is a reply whose every field extracts as absent,
+        # and absent is a legal parent answer. Only its shape tells it apart.
+        h = adopt_harness(issue_stdout=json.dumps({"message": "Not Found"}))
+        r = h.run(*adopt_args(), "--no-parent", "--top")
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        self.assertIn("could not be read", r.stderr)
+        self.assertTrue(wrote_nothing(h))
+
+    def test_a_malformed_parent_url_refuses_rather_than_reading_as_no_parent(self):
+        reply = issue_reply(ADOPT_NUM)
+        reply["parent_issue_url"] = "https://api.github.com/repos/x/y/issues/"
+        h = adopt_harness(issue_stdout=json.dumps(reply))
+        r = h.run(*adopt_args(), "--no-parent", "--top")
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        self.assertIn("parent", r.stderr)
+        self.assertIn("could not be read", r.stderr)
+        self.assertTrue(wrote_nothing(h))
+
+    def test_a_dependency_list_that_is_not_an_array_refuses(self):
+        # An object here would extract as no blockers, which is legal too.
+        h = adopt_harness(blocked_stdout=json.dumps({"message": "Not Found"}))
+        r = h.run(*adopt_args(), "--no-parent", "--top")
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        self.assertIn("blocked-by", r.stderr)
+        self.assertIn("could not be read", r.stderr)
         self.assertTrue(wrote_nothing(h))
 
     def test_a_plan_derived_adopted_body_refuses_no_parent(self):
@@ -1344,26 +1452,12 @@ class AdoptGate(unittest.TestCase):
         self.assertIn("--file-anyway", r.stdout + r.stderr)
         self.assertTrue(wrote_nothing(h))
 
-    def test_a_gh_whose_issue_edit_lacks_the_flags_refuses_the_adopt(self):
-        h = Harness("**Design:** none\n",
-                    boards=[ADOPT_PRE_BOARD, ADOPT_POST_BOARD],
-                    responses=adopt_responses(),
-                    probe=probe_rules(edit_flag_lines=""))
-        r = h.run(*adopt_args(), "--no-parent", "--top", "--dry-run")
-        self.assertNotEqual(r.returncode, 0)
-        out = r.stdout + r.stderr
-        self.assertIn("MISSING CAPABILITY", out)
-        for flag in ("--parent", "--add-blocked-by", "--add-blocking",
-                     "--remove-parent", "--remove-blocked-by",
-                     "--remove-blocking"):
-            self.assertIn(flag, out)
-        self.assertEqual([], h.network_calls())
-
 
 class AdoptContradiction(unittest.TestCase):
     """
     KD2: refuse rather than reconcile, and make every refusal CLEARABLE by
-    printing the exact `gh issue edit --remove-*` command.
+    printing the exact REST command that removes the link (#14 KTD9). Each
+    names a numeric issue `id`, taken from the replies adopt already read.
     """
 
     def test_an_existing_different_parent_refuses_and_names_the_clearing_command(self):
@@ -1373,8 +1467,9 @@ class AdoptContradiction(unittest.TestCase):
         out = r.stdout + r.stderr
         self.assertIn("77", out, "must name what it found")
         self.assertIn("55", out, "must name what was asked for")
-        self.assertIn("gh issue edit 200 --repo jffriend/photo-consolidation "
-                      "--remove-parent", out)
+        self.assertIn("gh api -X DELETE repos/jffriend/photo-consolidation/"
+                      "issues/77/sub_issue -F sub_issue_id=%d" % issue_id(200),
+                      out)
         self.assertTrue(wrote_nothing(h))
 
     def test_an_existing_parent_under_no_parent_refuses_the_same_way(self):
@@ -1383,7 +1478,7 @@ class AdoptContradiction(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         out = r.stdout + r.stderr
         self.assertIn("77", out)
-        self.assertIn("--remove-parent", out)
+        self.assertIn("issues/77/sub_issue -F sub_issue_id=", out)
         self.assertTrue(wrote_nothing(h))
 
     def test_unnamed_blocked_by_links_refuse_and_name_the_clearing_command(self):
@@ -1393,18 +1488,40 @@ class AdoptContradiction(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         out = r.stdout + r.stderr
         self.assertIn("133", out, "must name the link not asked for")
-        self.assertIn("gh issue edit 200 --repo jffriend/photo-consolidation "
-                      "--remove-blocked-by 133", out)
+        self.assertIn("gh api -X DELETE repos/jffriend/photo-consolidation/"
+                      "issues/200/dependencies/blocked_by/%d" % issue_id(133), out)
+        self.assertNotIn("blocked_by/%d" % issue_id(122), out,
+                         "a link that was asked for is not cleared")
         self.assertTrue(wrote_nothing(h))
 
     def test_unnamed_blocks_links_refuse_and_name_the_clearing_command(self):
+        # A blocks link is the blocked issue's blocked-by link, so it is
+        # cleared against #63, by #200's id.
         h = adopt_harness(pre_blocking=[63])
         r = h.run(*adopt_args(), "--no-parent", "--after", "101")
         self.assertNotEqual(r.returncode, 0)
         out = r.stdout + r.stderr
         self.assertIn("63", out)
-        self.assertIn("gh issue edit 200 --repo jffriend/photo-consolidation "
-                      "--remove-blocking 63", out)
+        self.assertIn("gh api -X DELETE repos/jffriend/photo-consolidation/"
+                      "issues/63/dependencies/blocked_by/%d" % issue_id(200), out)
+        self.assertTrue(wrote_nothing(h))
+
+    def test_an_unnamed_blocks_link_into_another_repo_is_cleared_in_that_repo(self):
+        # Dependency lists carry issues from other repos too (measured
+        # 2026-10-15: this repo's #14 blocks jffriend/pluckd#577). The link
+        # lives on the blocked issue, so the remedy must name ITS repo.
+        blocking = json.dumps([{
+            "number": 577, "id": 5872918136,
+            "repository_url": "https://api.github.com/repos/jffriend/pluckd"}])
+        responses = override(adopt_responses(), "issues/200/dependencies/blocking?",
+                             stdout=blocking)
+        h = Harness("**Design:** none\n", boards=[ADOPT_PRE_BOARD, ADOPT_POST_BOARD],
+                    responses=responses)
+        r = h.run(*adopt_args(), "--no-parent", "--after", "101")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("gh api -X DELETE repos/jffriend/pluckd/"
+                      "issues/577/dependencies/blocked_by/%d" % issue_id(200),
+                      r.stderr)
         self.assertTrue(wrote_nothing(h))
 
 
@@ -1420,45 +1537,40 @@ class AdoptDelta(unittest.TestCase):
           Issue may not contain duplicate sub-issues (addSubIssue)
 
     So the apply step sends a DELTA, not a set. Anything already correct is
-    skipped; anything contradicting has already been refused above.
+    skipped; anything contradicting has already been refused above. Over REST
+    each link is its own POST (#14 U4), and the delta decides which are sent.
     """
 
     def test_an_already_correct_parent_is_not_sent_again(self):
         h = adopt_harness(pre_parent="55", post_parent="55")
         r = h.run(*adopt_args(), "--parent", "55", "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        argv = edit_argv(h)
-        if argv is not None:
-            self.assertNotIn("--parent", argv,
-                             "a parent already correct must not be re-added")
+        self.assertEqual([], link_writes(h),
+                         "a parent already correct must not be re-added")
 
     def test_an_already_present_blocker_is_omitted_and_the_others_are_sent(self):
         h = adopt_harness(pre_blocked=[122], post_blocked=[122, 133])
         r = h.run(*adopt_args(**{"--blocked-by": "122,133"}), "--no-parent",
                   "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        argv = edit_argv(h)
-        self.assertIsNotNone(argv, "the missing blocker still has to be written")
-        self.assertIn("--add-blocked-by", argv)
-        self.assertEqual("133", argv[argv.index("--add-blocked-by") + 1],
-                         "only the link that is not already there is sent")
+        self.assertEqual(
+            [("200/dependencies/blocked_by", "issue_id=%d" % issue_id(133))],
+            link_writes(h), "only the link that is not already there is sent")
 
     def test_an_already_present_blocking_link_is_omitted_and_the_others_are_sent(self):
         """The `blocks` mirror of the blocked-by test above.
 
         Photos' original suite only carried this shape for parent and
-        blocked-by; blocking is the third relationship kind `EDIT_ARGS`
-        computes a delta for and needs its own proof.
+        blocked-by; blocking is the third relationship kind the delta is
+        computed for and needs its own proof.
         """
         h = adopt_harness(pre_blocking=[63], post_blocking=[63, 70])
         r = h.run(*adopt_args(**{"--blocks": "63,70"}), "--no-parent",
                   "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        argv = edit_argv(h)
-        self.assertIsNotNone(argv, "the missing blocking link still has to be written")
-        self.assertIn("--add-blocking", argv)
-        self.assertEqual("70", argv[argv.index("--add-blocking") + 1],
-                         "only the link that is not already there is sent")
+        self.assertEqual(
+            [("70/dependencies/blocked_by", "issue_id=%d" % issue_id(200))],
+            link_writes(h), "only the link that is not already there is sent")
 
     def test_the_position_write_is_issued_even_when_the_position_already_matches(self):
         """Position is the fourth placement answer, and the ONE relationship
@@ -1466,9 +1578,8 @@ class AdoptDelta(unittest.TestCase):
         blocked-by and blocks when the server already disagrees, and skips
         writing them again when the server already agrees -- but adopt does
         not refuse a reposition (all four placement answers are mandatory,
-        so a position is always named), and there is no `--position` flag on
-        `gh issue edit` to omit in the first place: the write is a separate
-        GraphQL mutation (`updateProjectV2ItemPosition`), issued
+        so a position is always named), and there is no REST position write
+        to omit in the first place: the write is a separate GraphQL mutation (`updateProjectV2ItemPosition`), issued
         unconditionally every time. This pins that as intentional, not a gap
         in the delta logic.
         """
@@ -1480,14 +1591,15 @@ class AdoptDelta(unittest.TestCase):
         self.assertEqual(1, len(positions),
                          "the position write is unconditional, not delta-gated")
 
-    def test_everything_already_present_issues_no_edit_at_all_and_still_reads_back(self):
+    def test_everything_already_present_issues_no_write_at_all_and_still_reads_back(self):
         h = adopt_harness(pre_parent="55", pre_blocked=[122], pre_blocking=[63],
                           post_parent="55", post_blocked=[122], post_blocking=[63])
         r = h.run("--adopt", ADOPT_NUM, "--parent", "55", "--after", "101",
                   "--blocked-by", "122", "--blocks", "63")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIsNone(edit_argv(h),
-                          "an empty delta must issue no gh issue edit at all")
+        self.assertEqual([], link_writes(h),
+                         "an empty delta must issue no link write at all")
+        self.assertIn("no write issued", r.stdout)
         out = r.stdout
         self.assertIn("board membership   ok", out)
         self.assertIn("board position     ok", out)
@@ -1496,10 +1608,10 @@ class AdoptDelta(unittest.TestCase):
         self.assertIn("blocks             ok (63)", out)
 
     def test_a_partially_applied_edit_is_caught_and_not_reported_as_nothing_written(self):
-        # The edit exits non-zero after the parent landed and the blocker did
-        # not. One rejected flag fails the whole call server-side, so "it
-        # exited non-zero" is not evidence that nothing was written.
-        h = adopt_harness(post_parent="55", post_blocked=[], edit_exit=1)
+        # Every write exits non-zero, yet the parent landed and the blocker
+        # did not. "It exited non-zero" is not evidence that nothing was
+        # written, so the read-back is what decides.
+        h = adopt_harness(post_parent="55", post_blocked=[], write_exit=1)
         r = h.run("--adopt", ADOPT_NUM, "--parent", "55", "--after", "101",
                   "--blocked-by", "122", "--blocks", "none")
         self.assertNotEqual(r.returncode, 0)
@@ -1508,6 +1620,36 @@ class AdoptDelta(unittest.TestCase):
         self.assertIn("MAY still have been written", out)
         self.assertNotIn("Nothing was changed", out)
         self.assertNotIn("nothing was written", out.lower())
+
+
+class AdoptResolvesBeforeWriting(unittest.TestCase):
+    """KTD3 holds in adopt too: every number adopt is about to link is
+    resolved before the first write. A typo in --parent or --blocks used to
+    surface only as a 404 on its own POST, after the other links had landed,
+    leaving the issue partly wired."""
+
+    MISSING = [{"match": "issues/999", "exit": 1,
+                "stderr": "gh: Not Found (HTTP 404)\n"}]
+
+    def _adopt(self, *args):
+        h = Harness("**Design:** none\n",
+                    boards=[ADOPT_PRE_BOARD, ADOPT_POST_BOARD],
+                    responses=self.MISSING + adopt_responses())
+        return h, h.run("--adopt", ADOPT_NUM, *args)
+
+    def test_a_blocks_number_that_does_not_exist_refuses_before_any_write(self):
+        h, r = self._adopt("--no-parent", "--after", "101",
+                           "--blocked-by", "122", "--blocks", "999")
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        self.assertIn("#999 does not exist", r.stderr)
+        self.assertTrue(wrote_nothing(h), "the blocked-by link must not land first")
+
+    def test_a_parent_number_that_does_not_exist_refuses_before_any_write(self):
+        h, r = self._adopt("--parent", "999", "--after", "101",
+                           "--blocked-by", "122", "--blocks", "none")
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        self.assertIn("#999 does not exist", r.stderr)
+        self.assertTrue(wrote_nothing(h), "the blocked-by link must not land first")
 
 
 class AdoptReadBack(unittest.TestCase):
@@ -1544,34 +1686,39 @@ class AdoptReadBack(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("parent", (r.stdout + r.stderr).lower())
 
-    def test_an_issue_already_on_the_board_resolves_its_item_id_by_number(self):
+    def test_an_issue_already_on_the_board_takes_its_item_id_from_the_listing(self):
         # item-add cannot answer this: the create path takes the id from
         # item-add's output and refuses when it is empty, which for an issue
-        # already on the board would abort a correctly wired filing.
+        # already on the board would abort a correctly wired filing. The
+        # pre-write listing carries the item's node id (#14 KTD5).
         h = adopt_harness()
         r = h.run(*adopt_args(), "--no-parent", "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertFalse(h.called("item-add"),
-                         "the id came from the by-number lookup, not item-add")
+        self.assertFalse(h.called(ITEM_ADD_MATCH),
+                         "the id came from the board listing, not item-add")
         positions = [c for c in h.calls()
                      if any("updateProjectV2ItemPosition" in a for a in c)]
         self.assertEqual(1, len(positions), positions)
-        self.assertIn("PVTI_adopt", " ".join(positions[0]))
+        self.assertIn("i=PVTI_200", positions[0])
+        self.assertIn("a=PVTI_101", positions[0])
         self.assertIn("board position     ok (after #101)", r.stdout)
 
-    def test_the_by_number_lookup_falls_back_to_item_add_when_it_finds_nothing(self):
-        # An adopted issue that is not on the board yet: the lookup returns
-        # nothing and item-add puts it there.
+    def test_an_issue_not_on_the_board_is_item_added(self):
+        # An adopted issue that is not on the board yet: the listing has no
+        # row for it, so item-add puts it there.
+        off_board = [(101, "First thing on the board"), (102, "Second thing")]
         top_board = [
             (200, "An existing issue being wired"),
             (101, "First thing on the board"),
             (102, "Second thing"),
         ]
-        h = adopt_harness(boards=[ADOPT_PRE_BOARD, top_board],
-                          item_by_number="")
+        h = adopt_harness(boards=[off_board, top_board])
         r = h.run(*adopt_args(), "--no-parent", "--top")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertTrue(h.called("item-add"))
+        self.assertTrue(h.called(ITEM_ADD_MATCH))
+        positions = [c for c in h.calls()
+                     if any("updateProjectV2ItemPosition" in a for a in c)]
+        self.assertIn("i=PVTI_from_item_add", positions[0])
         self.assertIn("board position     ok (top)", r.stdout)
 
     def test_an_adopt_failure_never_says_a_create_happened(self):
@@ -1724,18 +1871,29 @@ class OneImplementation(unittest.TestCase):
                 self.assertTrue(any("read_back" in p for p in problems), problems)
 
 
-PROVENANCE_PREFIXES = ("It is left", "Finish it by hand")
+PROVENANCE_PREFIXES = ("It is left", "Finish it", "In a local session")
 
 
 def failure_lines(stderr):
-    """The failure output minus the two lines that legitimately differ.
+    """The failure output minus the lines that legitimately differ.
 
     Only the provenance sentence and the next action depend on whether this run
     created the issue. Everything else -- the MISMATCH sentence and the
     requested-state summary -- must be byte-identical between the modes.
+
+    Create's next action is three lines (#14 KTD4): a "Finish it" line, the
+    adopt command on the line after it, and the local-session alternative.
+    The command line is dropped only where it follows a "Finish it" line, so
+    the re-verification command the other refusals print is still compared.
     """
-    return [ln for ln in stderr.splitlines()
-            if not ln.startswith(PROVENANCE_PREFIXES)]
+    out, after_finish = [], False
+    for ln in stderr.splitlines():
+        drop = ln.startswith(PROVENANCE_PREFIXES) \
+            or (after_finish and ln.startswith("  bash "))
+        after_finish = ln.startswith("Finish it")
+        if not drop:
+            out.append(ln)
+    return out
 
 
 class BehaviouralEquivalence(unittest.TestCase):
@@ -1770,9 +1928,17 @@ class BehaviouralEquivalence(unittest.TestCase):
         h = Harness("**Design:** none\n",
                     boards=[PRE_BOARD, board_after],
                     responses=create_responses(blocked, blocking, parent))
-        return h.run("--title", "A brand new distinct piece of work",
-                     "--body-file", str(h.body_file), "--shape", "work",
-                     *args)
+        return self._same_config(h, h.run(
+            "--title", "A brand new distinct piece of work",
+            "--body-file", str(h.body_file), "--shape", "work", *args))
+
+    @staticmethod
+    def _same_config(h, r):
+        # Each harness has its own temp --config path, and the re-verify
+        # command prints it. That is the one difference that is not the
+        # read-back's, so it is named out before comparing.
+        r.stderr = r.stderr.replace(str(h.config_path), "<config>")
+        return r
 
     def _adopt(self, board_after, parent, blocked, blocking, args):
         h = Harness("**Design:** none\n",
@@ -1780,7 +1946,7 @@ class BehaviouralEquivalence(unittest.TestCase):
                     responses=adopt_responses(post_parent=parent,
                                               post_blocked=blocked,
                                               post_blocking=blocking))
-        return h.run("--adopt", ADOPT_NUM, *args)
+        return self._same_config(h, h.run("--adopt", ADOPT_NUM, *args))
 
     def _compare(self, create_r, adopt_r):
         self.assertNotEqual(create_r.returncode, 0, create_r.stdout)
@@ -1834,31 +2000,30 @@ class BehaviouralEquivalence(unittest.TestCase):
             self._adopt(ADOPT_POST_BOARD, None, [], [], args))
 
 
-# create's flag names, canonicalised to adopt's. An EXPLICIT map, so a fourth
-# relationship added to one mode fails this test instead of slipping past an
-# enumeration that silently stopped covering it.
-RELATIONSHIP_FLAG_MAP = {
-    "--parent": "--parent",
-    "--blocked-by": "--add-blocked-by",
-    "--blocking": "--add-blocking",
-    "--add-blocked-by": "--add-blocked-by",
-    "--add-blocking": "--add-blocking",
-}
-NOT_RELATIONSHIPS = {"--no-parent"}
+def relationship_set(h):
+    """Every relationship this run wrote, as {(kind, other issue number)}.
 
-
-def relationship_set(argv):
-    """Every relationship-bearing flag in an argv, as {(canonical, value)}."""
+    Read off the REST writes `link_writes` returns, with each numeric id
+    turned back into its number. An EXPLICIT mapping, so a write of a fourth
+    kind fails this test instead of slipping past an enumeration that silently
+    stopped covering it.
+    """
     out = set()
-    for i, arg in enumerate(argv):
-        if not arg.startswith("--") or arg in NOT_RELATIONSHIPS:
-            continue
-        if arg in RELATIONSHIP_FLAG_MAP:
-            out.add((RELATIONSHIP_FLAG_MAP[arg], argv[i + 1]))
-        elif "parent" in arg or "block" in arg:
+    for path, field in link_writes(h):
+        target, _, endpoint = path.partition("/")
+        if not field:
+            raise AssertionError("relationship write with no id field: %r" % path)
+        other = int(field.split("=", 1)[1]) - ISSUE_ID_BASE
+        if endpoint == "sub_issues" and other == int(ADOPT_NUM):
+            out.add(("parent", int(target)))
+        elif endpoint == "dependencies/blocked_by" and target == ADOPT_NUM:
+            out.add(("blocked-by", other))
+        elif endpoint == "dependencies/blocked_by" and other == int(ADOPT_NUM):
+            out.add(("blocks", int(target)))
+        else:
             raise AssertionError(
-                "unmapped relationship-bearing flag %r -- add it to "
-                "RELATIONSHIP_FLAG_MAP so parity keeps binding" % arg)
+                "unmapped relationship write %r %r -- map it in "
+                "relationship_set so parity keeps binding" % (path, field))
     return out
 
 
@@ -1887,17 +2052,15 @@ class WriteShapeParity(unittest.TestCase):
                   "--body-file", str(h.body_file), "--shape", "work",
                   *args)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        argv = create_argv(h)
-        self.assertIsNotNone(argv)
-        return relationship_set(argv)
+        self.assertIsNotNone(create_argv(h))
+        return relationship_set(h)
 
     def _adopt_set(self, args, blocked, blocking, parent):
         h = adopt_harness(post_parent=parent, post_blocked=blocked,
                           post_blocking=blocking)
         r = h.run("--adopt", ADOPT_NUM, *args)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        argv = edit_argv(h)
-        return relationship_set(argv) if argv else set()
+        return relationship_set(h)
 
     def test_all_three_relationships_are_written_the_same_by_both_modes(self):
         args = ["--parent", "55", "--after", "101", "--blocked-by", "122",
@@ -1983,7 +2146,7 @@ class ReadBackRetry(unittest.TestCase):
 
     @staticmethod
     def _board_reads(h):
-        return [c for c in h.calls() if any("items(first: 100" in a for a in c)]
+        return [c for c in h.calls() if any("/items?per_page=" in a for a in c)]
 
     def test_listing_catches_up_on_the_second_read(self):
         """The defect itself: absent on the first read, there on the second."""
@@ -2229,8 +2392,9 @@ class ReadBackRetry(unittest.TestCase):
 def override(responses, match, **fields):
     """Return `responses` with the rule whose `match` is `match` replaced.
 
-    Keeps the ORDER of the table, which several rules depend on -- the marked
-    GraphQL lookups have to stay ahead of the generic `projectItems` rule.
+    Keeps the ORDER of the table, which several rules depend on -- item-add
+    has to stay ahead of the generic `-X POST` rule, and the dependency-list
+    reads ahead of the bare issue read.
     """
     out = []
     seen = 0
@@ -2254,7 +2418,12 @@ def position_line(stdout):
 
 
 class ReadBackProvesSomething(unittest.TestCase):
-    """F1: the relationship read-back passed on ANY non-empty JSON."""
+    """F1: the relationship read-back passed on ANY non-empty JSON.
+
+    Over REST (#14 KTD6) it reads three replies, and each one's SHAPE is
+    checked, because empty is a legal answer for all three: an issue with no
+    parent, no blockers, blocking nothing.
+    """
 
     BOARD_AFTER = [
         (101, "First thing on the board"),
@@ -2262,7 +2431,30 @@ class ReadBackProvesSomething(unittest.TestCase):
         (102, "Second thing"),
     ]
 
-    def test_a_reply_without_the_three_fields_is_not_a_pass(self):
+    def _run(self, match=None, args=("--no-parent",), parent=None, **fields):
+        responses = create_responses([], [], parent)
+        if match is not None:
+            responses = override(responses, match, **fields)
+        h = Harness("**Design:** none\n", boards=[PRE_BOARD, self.BOARD_AFTER],
+                    responses=responses)
+        r = h.run(*full_args(h.body_file), *args, "--after", "101")
+        return r, r.stdout + r.stderr
+
+    # The read-back line each REST reply proves, keyed by the rule answering it.
+    OK_LINE = {READ_ISSUE_MATCH: "  parent             ok",
+               READ_BLOCKED_MATCH: "  blocked-by         ok",
+               READ_BLOCKING_MATCH: "  blocks             ok"}
+
+    def _assert_could_not_look(self, r, out, match):
+        self.assertNotEqual(r.returncode, 0, out)
+        self.assertNotIn("every relationship read back matching", out)
+        self.assertNotIn(self.OK_LINE[match], out,
+                         "a reply that could not be read proved nothing")
+        self.assertIn("The READ failed, not the write.", out,
+                      "a reply that could not be read is not a failed write")
+        self.assertNotIn("delete", out.replace("Do not delete", ""))
+
+    def test_an_issue_reply_without_number_and_state_is_not_a_pass(self):
         """`{"message":"Not Found"}` used to read back as three clean `ok`s.
 
         Every jq extraction on it yields empty, and empty compares EQUAL to the
@@ -2270,34 +2462,48 @@ class ReadBackProvesSomething(unittest.TestCase):
         `parent ok (none)`, `blocked-by ok (none)`, `blocks ok (none)` and
         exited 0 having proven nothing at all.
         """
-        h = Harness(
-            "**Design:** none\n",
-            boards=[PRE_BOARD, self.BOARD_AFTER],
-            responses=override(create_responses([], []),
-                               "--json parent,blockedBy,blocking",
-                               stdout=json.dumps({"message": "Not Found"})),
-        )
-        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
-        out = r.stdout + r.stderr
-        self.assertNotEqual(r.returncode, 0, out)
+        r, out = self._run(READ_ISSUE_MATCH,
+                           stdout=json.dumps({"message": "Not Found"}))
+        self._assert_could_not_look(r, out, READ_ISSUE_MATCH)
         self.assertIn("unrecognised shape", out)
-        self.assertNotIn("every relationship read back matching", out)
-        self.assertIn("The READ failed, not the write.", out,
-                      "a reply that could not be read is not a failed write")
-        self.assertNotIn("delete", out.replace("Do not delete", ""))
 
-    def test_a_relationship_read_that_exits_non_zero_is_not_a_pass(self):
-        h = Harness(
-            "**Design:** none\n",
-            boards=[PRE_BOARD, self.BOARD_AFTER],
-            responses=override(create_responses([], []),
-                               "--json parent,blockedBy,blocking",
-                               stdout="", exit=1),
-        )
-        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
-        out = r.stdout + r.stderr
-        self.assertNotEqual(r.returncode, 0, out)
-        self.assertIn("The READ failed, not the write.", out)
+    def test_an_issue_read_that_exits_non_zero_is_not_a_pass(self):
+        r, out = self._run(READ_ISSUE_MATCH, stdout="", exit=1,
+                           stderr="gh: Server Error (HTTP 502)\n")
+        self._assert_could_not_look(r, out, READ_ISSUE_MATCH)
+
+    def test_a_dependency_list_that_is_not_an_array_is_not_a_pass(self):
+        # Covers R4. An object there would extract as "no links".
+        for match in (READ_BLOCKED_MATCH, READ_BLOCKING_MATCH):
+            with self.subTest(match=match):
+                r, out = self._run(match,
+                                   stdout=json.dumps({"message": "Not Found"}))
+                self._assert_could_not_look(r, out, match)
+
+    def test_a_dependency_read_that_exits_non_zero_is_not_a_pass(self):
+        r, out = self._run(READ_BLOCKING_MATCH, stdout="", exit=1,
+                           stderr="gh: Server Error (HTTP 502)\n")
+        self._assert_could_not_look(r, out, READ_BLOCKING_MATCH)
+
+    def test_a_malformed_parent_url_is_not_read_as_no_parent(self):
+        reply = issue_reply(200)
+        reply["parent_issue_url"] = "https://api.github.com/repos/x/y/issues/"
+        r, out = self._run(READ_ISSUE_MATCH, stdout=json.dumps(reply))
+        self._assert_could_not_look(r, out, READ_ISSUE_MATCH)
+        self.assertIn("parent", out)
+
+    def test_a_parentless_reply_with_no_parent_key_passes_a_no_parent_filing(self):
+        # GitHub OMITS parent_issue_url on a parentless issue (measured
+        # 2026-10-15), so an absent key is "no parent", not "could not look".
+        self.assertNotIn("parent_issue_url", issue_reply(200), "precondition")
+        r, out = self._run()
+        self.assertEqual(0, r.returncode, out)
+        self.assertIn("parent             ok (none)", r.stdout)
+
+    def test_a_parent_url_naming_the_asked_for_parent_passes(self):
+        r, out = self._run(args=("--parent", "240"), parent="240")
+        self.assertEqual(0, r.returncode, out)
+        self.assertIn("parent             ok (#240)", r.stdout)
 
 
 class NumbersAreValidatedOffline(unittest.TestCase):
@@ -2407,11 +2613,11 @@ class DuplicateNumbersInAnAnswer(unittest.TestCase):
                   "--blocked-by", "122,122", "--blocks", "none")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("blocked-by         ok (122)", r.stdout)
-        argv = create_argv(h)
-        self.assertEqual("122", argv[argv.index("--blocked-by") + 1],
-                         "the WRITE must not carry the repeat either -- "
-                         "gh rejects an already-present link and fails the "
-                         "whole call")
+        self.assertEqual(
+            [("200/dependencies/blocked_by", "issue_id=%d" % issue_id(122))],
+            link_writes(h),
+            "the WRITE must not carry the repeat either -- a second write of "
+            "an already-present link is refused")
 
     def test_a_repeated_blocker_reads_back_as_correctly_wired_on_adopt(self):
         h = adopt_harness(post_blocked=[122])
@@ -2419,10 +2625,9 @@ class DuplicateNumbersInAnAnswer(unittest.TestCase):
                   "--blocked-by", "122,122", "--blocks", "none")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("blocked-by         ok (122)", r.stdout)
-        argv = edit_argv(h)
-        self.assertIsNotNone(argv)
-        self.assertEqual("122", argv[argv.index("--add-blocked-by") + 1],
-                         "the adopt delta must not emit a repeat")
+        self.assertEqual(
+            [("200/dependencies/blocked_by", "issue_id=%d" % issue_id(122))],
+            link_writes(h), "the adopt delta must not emit a repeat")
 
     def test_a_repeated_blocks_number_behaves_the_same_way(self):
         h = Harness(
@@ -2438,88 +2643,214 @@ class DuplicateNumbersInAnAnswer(unittest.TestCase):
         self.assertIn("blocks             ok (63)", r.stdout)
 
 
-class ProbeTerminator(unittest.TestCase):
-    """F6: the probe passed a FLAGLESS gh when the FLAGS terminator moved."""
-
-    def test_a_renamed_terminator_does_not_let_examples_satisfy_the_probe(self):
-        """Closing the block on one hardcoded literal failed UNSAFE.
-
-        With `INHERITED FLAGS` renamed to `GLOBAL FLAGS` the block ran to end
-        of file and swallowed EXAMPLES -- which on real gh 2.98.0 names
-        `--parent`, `--blocked-by` and `--blocking`. A gh with none of the
-        flags in its FLAGS block then probed "ok" and was rejected mid-write,
-        leaving behind the exact half-wired issue the probe exists to prevent.
-
-        `test_examples_naming_the_flags_do_not_satisfy_the_probe` keeps the
-        terminator, so it cannot see this.
-        """
-        flagless = create_help("").replace("INHERITED FLAGS", "GLOBAL FLAGS")
-        self.assertIn("EXAMPLES", flagless)
-        self.assertIn("--parent", flagless.split("EXAMPLES", 1)[1],
-                      "the EXAMPLES must still name the flags, or this test "
-                      "would pass for the wrong reason")
-        h = Harness("**Design:** none\n", probe=probe_rules(help_text=flagless))
-        r = h.run(*full_args(h.body_file), "--no-parent", "--top", "--dry-run")
-        out = r.stdout + r.stderr
-        self.assertNotEqual(r.returncode, 0, out)
-        self.assertIn("MISSING CAPABILITY", out)
-        self.assertEqual([], h.network_calls())
-
-    def test_a_lost_opener_still_fails_safe_as_undeterminable(self):
-        """The other direction, pinned so a future edit cannot swap them."""
-        no_flags_header = create_help().replace("\nFLAGS\n", "\nOPTIONS\n")
-        h = Harness("**Design:** none\n",
-                    probe=probe_rules(help_text=no_flags_header))
-        r = h.run(*full_args(h.body_file), "--no-parent", "--top", "--dry-run")
-        out = r.stdout + r.stderr
-        self.assertNotEqual(r.returncode, 0, out)
-        self.assertIn("UNDETERMINABLE CAPABILITY", out)
+def board_page_without_node_id(rows, n):
+    """`board_page(rows)` with issue #n's item carrying no node id."""
+    head, body = board_page(rows).split("\r\n\r\n", 1)
+    items = json.loads(body)
+    for item in items:
+        if item["content"]["number"] == n:
+            del item["node_id"]
+    return head + "\r\n\r\n" + json.dumps(items)
 
 
 class ErroredLookupIsNotAnAbsentItem(unittest.TestCase):
-    """F8: a FAILED `--after` lookup was reported as proven-wrong."""
+    """F8: a FAILED `--after` lookup was reported as proven-wrong.
 
-    def test_an_errored_after_lookup_says_the_READ_failed(self):
-        """`2>/dev/null` made an errored query look exactly like an absent
-        item, and the call site routed that to half_wired() -- the did-not-land
-        refusal, the one that prints "delete #N and re-run" -- over a READ that
-        failed."""
-        board_after = [
-            (101, "First thing on the board"),
-            (200, "A brand new distinct piece of work"),
-            (102, "Second thing"),
-        ]
+    The `--after` item's node id now comes from the pre-write board listing
+    (#14 KTD5), which the gate already proved names #AFTER. So the item can no
+    longer be ABSENT once a write has happened; it can still be UNREADABLE --
+    a row with no node id -- and that must stay a could-not-look.
+    """
+
+    BOARD_AFTER = [
+        (101, "First thing on the board"),
+        (200, "A brand new distinct piece of work"),
+        (102, "Second thing"),
+    ]
+
+    def test_an_after_item_with_no_node_id_says_the_READ_failed(self):
+        """`2>/dev/null` once made an errored query look exactly like an
+        absent item, and the call site routed that to half_wired() -- the
+        did-not-land refusal, the one that prints "delete #N and re-run" --
+        over a READ that failed."""
         h = Harness(
             "**Design:** none\n",
-            boards=[PRE_BOARD, board_after],
-            responses=override(create_responses([], []), "projectItems",
-                               stdout="", stderr="GraphQL: something broke\n",
-                               exit=1),
+            boards=[PRE_BOARD, self.BOARD_AFTER],
+            board_stdouts=[board_page_without_node_id(PRE_BOARD, 101),
+                           board_page(self.BOARD_AFTER)],
+            responses=create_responses([], []),
         )
         r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
         out = r.stdout + r.stderr
-        self.assertNotEqual(r.returncode, 0, out)
+        self.assertEqual(1, r.returncode, out)
+        self.assertIn("the board item for #101 could not be read", out)
         self.assertIn("The READ failed, not the write.", out)
-        self.assertNotIn("could not find the board item", out)
         self.assertNotIn("delete", out.replace("Do not delete", ""))
         self.assertIn("--adopt 200", out, "must name a safe next action")
+        self.assertFalse(h.called(POSITION_MATCH))
 
-    def test_a_genuinely_absent_after_item_still_takes_the_proven_wrong_path(self):
-        board_after = [
-            (101, "First thing on the board"),
-            (200, "A brand new distinct piece of work"),
-            (102, "Second thing"),
-        ]
-        h = Harness(
-            "**Design:** none\n",
-            boards=[PRE_BOARD, board_after],
-            responses=override(create_responses([], []), "projectItems",
-                               stdout="", exit=0),
-        )
-        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
+
+POSITION_403 = {"exit": 1, "stdout": "",
+                "stderr": "gh: Resource not accessible by integration (HTTP 403)\n"}
+
+
+class BoardHalfOverRest(unittest.TestCase):
+    """#14 U5: item-add is a REST POST carrying the issue's numeric id, and the
+    position write -- the one GraphQL call left -- is classified by its error
+    (KTD2): HTTP 403 degrades, anything else is half-wired as before."""
+
+    BOARD_AFTER = [
+        (101, "First thing on the board"),
+        (200, "A brand new distinct piece of work"),
+        (102, "Second thing"),
+    ]
+
+    def _run(self, responses=None, boards=None):
+        h = Harness("**Design:** none\n",
+                    boards=boards or [PRE_BOARD, self.BOARD_AFTER],
+                    responses=responses or create_responses([], []))
+        return h, h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
+
+    def test_item_add_posts_the_issue_id_and_the_position_takes_its_node_id(self):
+        h, r = self._run()
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        adds = [c for c in h.calls() if ITEM_ADD_MATCH in " ".join(c)]
+        self.assertEqual(1, len(adds), adds)
+        self.assertEqual(["api", "-X", "POST", "users/jffriend/projectsV2/2/items",
+                          "-f", "type=Issue", "-F", "id=%d" % issue_id(200)],
+                         adds[0])
+        positions = [c for c in h.calls() if POSITION_MATCH in " ".join(c)]
+        self.assertEqual(1, len(positions), positions)
+        self.assertIn("i=PVTI_200", positions[0])
+        self.assertIn("a=PVTI_101", positions[0],
+                      "the --after item's node id, from the pre-write listing")
+
+    def test_a_refused_position_write_continues_to_the_read_back(self):
+        h, r = self._run(override(create_responses([], []), POSITION_MATCH,
+                                  **POSITION_403))
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertIn("READ-BACK", r.stdout)
+        self.assertIn("board membership   ok", r.stdout)
+        self.assertNotIn("MISMATCH", r.stderr)
+
+    def test_a_position_write_failing_any_other_way_is_half_wired(self):
+        h, r = self._run(override(create_responses([], []), POSITION_MATCH,
+                                  exit=1, stdout="",
+                                  stderr="gh: Bad Gateway (HTTP 502)\n"))
+        err = r.stderr
+        self.assertEqual(1, r.returncode, r.stdout + err)
+        self.assertIn("MISMATCH: the board position write failed for #200", err)
+        self.assertIn("HTTP 502", err, "gh's own reason reaches the operator")
+        self.assertIn("It is left HALF-WIRED", err)
+        self.assertNotIn("READ-BACK", r.stdout)
+        self.assertNotIn("NOT SET", r.stdout + err)
+
+    def test_corroboration_reads_the_item_item_add_returned(self):
+        # The listing never shows #200; the single-item read by item-add's
+        # numeric id is what proves membership.
+        h, r = self._run(create_responses([], [], corroborate=True),
+                         boards=[PRE_BOARD, BOARD_WITHOUT_200])
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        self.assertIn("Membership is PROVEN", r.stderr)
+        self.assertTrue(h.called("api", "users/jffriend/projectsV2/2/items/900200"))
+
+    def test_a_corroborating_item_that_names_another_issue_proves_nothing(self):
+        # A reply that is the wrong item, or not an item at all, must not read
+        # as membership.
+        for reply in (item_reply(201), {"message": "Not Found"}):
+            with self.subTest(reply=reply):
+                responses = override(create_responses([], []), ITEM_READ_MATCH,
+                                     stdout=json.dumps(reply))
+                h, r = self._run(responses, boards=[PRE_BOARD, BOARD_WITHOUT_200])
+                self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+                self.assertIn("not on the board", r.stderr)
+                self.assertNotIn("Membership is PROVEN", r.stderr)
+
+
+class DegradedPosition(unittest.TestCase):
+    """#14 U6 / KTD8: a position write refused with HTTP 403 leaves the item
+    where it landed. Membership is still proven, the position comparison is
+    skipped and reported NOT SET, adopt's move comment is not written, and the
+    run ends 0 with the command a local session runs to place it."""
+
+    BOARD_AFTER = [
+        (101, "First thing on the board"),
+        (102, "Second thing"),
+        (200, "A brand new distinct piece of work"),
+    ]
+
+    def _create(self, boards=None, corroborate=""):
+        responses = override(create_responses([], [], corroborate=corroborate),
+                             POSITION_MATCH, **POSITION_403)
+        h = Harness("**Design:** none\n",
+                    boards=boards or [PRE_BOARD, self.BOARD_AFTER],
+                    responses=responses)
+        return h, h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
+
+    def test_a_degraded_create_proves_membership_and_says_not_set(self):
+        # #200 landed at the bottom, not after #101: no position mismatch.
+        h, r = self._create()
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertIn("board membership   ok", r.stdout)
+        self.assertIn("board position     NOT SET", r.stdout)
+        self.assertNotIn("board position     ok", r.stdout)
+        self.assertNotIn("MISMATCH", r.stderr)
+        self.assertIn("blocks             ok (none)", r.stdout,
+                      "the relationships are still read back")
+        err = r.stderr
+        self.assertIn("HTTP 403", err)
+        self.assertIn("wherever it landed", err)
+        self.assertIn(
+            "  bash %s --config %s --adopt 200 --no-parent --after 101 "
+            "--blocked-by none --blocks none" % (FILE_ISSUE, h.config_path),
+            err.splitlines(), "the exact command a local session runs")
+
+    def test_a_degraded_create_proven_only_by_corroboration_succeeds(self):
+        h, r = self._create(boards=[PRE_BOARD, BOARD_WITHOUT_200],
+                            corroborate=True)
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertIn("board membership   ok", r.stdout)
+        self.assertIn("board position     NOT SET", r.stdout)
+
+    def test_a_degraded_create_that_never_appears_is_still_absent(self):
+        h, r = self._create(boards=[PRE_BOARD, BOARD_WITHOUT_200])
         out = r.stdout + r.stderr
-        self.assertNotEqual(r.returncode, 0, out)
-        self.assertIn("could not find the board item for #101", out)
+        self.assertEqual(1, r.returncode, out)
+        self.assertIn("not on the board", out)
+        self.assertNotIn("NOT SET", r.stdout)
+        self.assertNotIn("delete", out.replace("Do not delete", ""))
+        self.assertEqual(5, len([c for c in h.calls()
+                                 if any("/items?per_page=" in a for a in c)]) - 1,
+                         "the same retry bound is spent before refusing")
+
+    def test_a_degraded_adopt_that_would_have_moved_writes_no_comment(self):
+        # #200 sits third on ADOPT_PRE_BOARD; --after 101 would move it.
+        responses = override(adopt_responses(), POSITION_MATCH, **POSITION_403)
+        h = Harness("**Design:** none\n",
+                    boards=[ADOPT_PRE_BOARD, ADOPT_PRE_BOARD],
+                    responses=responses)
+        r = h.run(*adopt_args(), "--no-parent", "--after", "101")
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertIn("MOVES it", position_line(r.stdout))
+        self.assertIn("board position     NOT SET", r.stdout)
+        self.assertEqual([], comment_calls(h), "nothing moved, so nothing to record")
+        self.assertNotIn("move recorded", r.stdout)
+        self.assertIn("--adopt 200 --no-parent --after 101", r.stderr)
+
+    def test_a_degraded_adopt_already_in_place_proves_the_position(self):
+        # #200 already follows #102 on ADOPT_PRE_BOARD, so nothing has to
+        # move: a refused position write changes nothing, and the read-back
+        # proves the position instead of reporting it NOT SET.
+        responses = override(adopt_responses(), POSITION_MATCH, **POSITION_403)
+        h = Harness("**Design:** none\n",
+                    boards=[ADOPT_PRE_BOARD, ADOPT_PRE_BOARD],
+                    responses=responses)
+        r = h.run(*adopt_args(), "--no-parent", "--after", "102")
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertIn("does NOT move it", position_line(r.stdout))
+        self.assertIn("board position     ok", r.stdout)
+        self.assertNotIn("NOT SET", r.stdout + r.stderr)
+        self.assertEqual([], comment_calls(h))
 
 
 class RetryCeilingIsEnforced(unittest.TestCase):
@@ -2552,35 +2883,6 @@ class RetryCeilingIsEnforced(unittest.TestCase):
                   env={"FILE_ISSUE_READBACK_ATTEMPTS": 2,
                        "FILE_ISSUE_READBACK_DELAY": 30})
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-
-
-class VersionGapArithmetic(unittest.TestCase):
-    """F10: the gap subtracted MINOR versions only."""
-
-    def test_a_future_major_version_is_not_reported_as_behind(self):
-        """gh 3.1 was reported as 97 releases BEHIND 2.98 -- a wrong number
-        stated as confidently as a right one, in the sentence whose whole job
-        is making the refusal clearable."""
-        h = Harness("**Design:** none\n",
-                    probe=probe_rules(version_line="gh version 3.1.0 (2027-01-01)\n",
-                                      flag_lines=""))
-        r = h.run(*full_args(h.body_file), "--no-parent", "--top", "--dry-run")
-        out = r.stdout + r.stderr
-        self.assertNotEqual(r.returncode, 0, out)
-        self.assertIn("installed gh 3.1.0", out)
-        self.assertNotIn("97 release", out)
-        self.assertNotIn("93 release", out)
-        self.assertIn("major version ahead", out)
-
-    def test_an_older_version_on_the_same_major_still_counts_releases(self):
-        h = Harness("**Design:** none\n",
-                    probe=probe_rules(version_line="gh version 2.90.0 (2026-06-01)\n",
-                                      flag_lines=""))
-        r = h.run(*full_args(h.body_file), "--no-parent", "--top", "--dry-run")
-        out = r.stdout + r.stderr
-        self.assertNotEqual(r.returncode, 0, out)
-        self.assertIn("8 release(s) behind 2.98.0", out)
-        self.assertIn("4 release(s) behind 2.94.0", out)
 
 
 class AbsentRefusalWording(unittest.TestCase):
@@ -2654,14 +2956,21 @@ class AdoptDisclosesTheMove(unittest.TestCase):
         self.assertIn("MOVES it", line)
 
 
+COMMENT_MATCH = "issues/200/comments"
+
+
 def comment_calls(h):
-    """Every real `gh issue comment` argv this run made."""
-    return [c for c in h.calls() if c[:2] == ["issue", "comment"]]
+    """Every comment this run posted: `gh api -X POST .../issues/N/comments`."""
+    return [c for c in h.calls()
+            if c[:3] == ["api", "-X", "POST"] and len(c) > 3
+            and c[3].endswith("/comments")]
 
 
 def comment_body(call):
-    """The --body argument of a `gh issue comment` argv."""
-    return call[call.index("--body") + 1]
+    """The `body=` field of a comment POST."""
+    bodies = [a for a in call if a.startswith("body=")]
+    assert len(bodies) == 1, call
+    return bodies[0][len("body="):]
 
 
 class AdoptRecordsTheMove(unittest.TestCase):
@@ -2686,7 +2995,8 @@ class AdoptRecordsTheMove(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         calls = comment_calls(h)
         self.assertEqual(1, len(calls), calls)
-        self.assertIn("200", calls[0])
+        self.assertEqual("repos/jffriend/photo-consolidation/issues/200/comments",
+                         calls[0][3])
         body = comment_body(calls[0])
         self.assertIn("position 3", body)
         self.assertIn("following #102", body)
@@ -2729,8 +3039,7 @@ class AdoptRecordsTheMove(unittest.TestCase):
         # No origin slot exists, so there is nothing to record -- and the run
         # must not trip over the absent one.
         off_board = [(101, "First thing on the board"), (102, "Second thing")]
-        h = adopt_harness(boards=[off_board, ADOPT_POST_BOARD],
-                          item_by_number="")
+        h = adopt_harness(boards=[off_board, ADOPT_POST_BOARD])
         r = h.run(*adopt_args(), "--no-parent", "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual([], comment_calls(h))
@@ -2785,8 +3094,9 @@ class AdoptRecordsTheMove(unittest.TestCase):
         h = Harness(
             "**Design:** none\n",
             boards=[ADOPT_PRE_BOARD, ADOPT_POST_BOARD],
-            responses=[{"match": "issue comment", "stdout": "",
-                        "stderr": "HTTP 502", "exit": 1}] + adopt_responses(),
+            responses=[{"match": COMMENT_MATCH, "stdout": "",
+                        "stderr": "gh: Bad Gateway (HTTP 502)\n", "exit": 1}]
+            + adopt_responses(),
         )
         r = h.run(*adopt_args(), "--no-parent", "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -2840,10 +3150,10 @@ class AdoptRecordsTheMove(unittest.TestCase):
 
 
 class FakeGhRuleOrder(unittest.TestCase):
-    """F14: the two GraphQL markers are distinct and neither shadows the
-    other -- but only because their rules come BEFORE the generic
-    `projectItems` rule. Nothing asserted that, and a reorder would make
-    `test_missing_from_the_board_fails_loudly` unable to fail."""
+    """F14: the fake matches argv SUBSTRINGS, so a specific rule only answers
+    when it comes before every more general rule it overlaps. Nothing used to
+    assert that, and a reorder made `test_missing_from_the_board_fails_loudly`
+    unable to fail."""
 
     @staticmethod
     def _index(rules, match):
@@ -2852,29 +3162,41 @@ class FakeGhRuleOrder(unittest.TestCase):
                 return i
         raise AssertionError("no rule matching %r" % match)
 
-    def test_the_marked_lookups_come_before_the_generic_one(self):
-        create = create_responses([], [])
-        self.assertLess(self._index(create, "boardMembershipCorroboration"),
-                        self._index(create, "projectItems"))
-        adopt = adopt_responses()
-        for marker in ("boardItemByIssueNumber", "boardMembershipCorroboration"):
-            self.assertLess(self._index(adopt, marker),
-                            self._index(adopt, "projectItems"),
-                            "%s must be answerable separately" % marker)
+    def test_item_add_comes_before_the_generic_post(self):
+        # Item-add is a POST too; behind `-X POST` it would answer `{}`.
+        for table in (create_responses([], []), adopt_responses()):
+            self.assertLess(self._index(table, ITEM_ADD_MATCH),
+                            self._index(table, "-X POST"))
 
-    def test_the_adopt_prefetch_comes_before_the_read_back(self):
-        """The pre-fetch's field list CONTAINS the read-back's as a substring,
-        so the order is what tells them apart."""
-        adopt = adopt_responses()
-        self.assertLess(
-            self._index(adopt, "--json state,body,parent,blockedBy,blocking"),
-            self._index(adopt, "--json parent,blockedBy,blocking"))
+    def test_the_dependency_reads_come_before_the_issue_read(self):
+        """`issues/200` is a substring of both dependency-list paths, so the
+        order is what tells them apart."""
+        for table in (create_responses([], []), adopt_responses()):
+            bare = self._index(table, READ_ISSUE_MATCH)
+            for match in (READ_BLOCKED_MATCH, READ_BLOCKING_MATCH):
+                self.assertLess(self._index(table, match), bare)
 
-    def test_the_markers_the_script_emits_are_the_ones_the_fake_matches(self):
-        text = FILE_ISSUE.read_text()
-        for marker in ("boardItemByIssueNumber", "boardMembershipCorroboration"):
-            self.assertIn(marker, text,
-                          "the fake keys on a marker the script no longer emits")
+    def test_no_rule_is_shadowed_by_an_earlier_one(self):
+        """A rule whose match CONTAINS an earlier rule's match can never be
+        reached: every argv it matches, the earlier one matched first. A
+        test leaning on it would pass on the wrong reply."""
+        for name, table in (("create", create_responses([], [])),
+                            ("adopt", adopt_responses())):
+            matches = [r["match"] for r in table]
+            for j, later in enumerate(matches):
+                for earlier in matches[:j]:
+                    self.assertNotIn(
+                        earlier, later,
+                        "%s table: %r is dead behind %r" % (name, later, earlier))
+
+    def test_every_write_reaches_the_post_rule_before_any_read_rule(self):
+        """`issues/55/sub_issues` also contains `issues/55`. The write rules
+        come first, so a write is never answered with an issue read."""
+        for table in (create_responses([], []), adopt_responses()):
+            post = self._index(table, "-X POST")
+            for i, rule in enumerate(table):
+                if rule["match"].startswith("issues/"):
+                    self.assertLess(post, i, rule["match"])
 
 
 # ---------------------------------------------------------------------------
@@ -2903,7 +3225,7 @@ class ConfigValidation(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         out = r.stdout + r.stderr
         self.assertIn("zero shapes", out)
-        self.assertFalse(h.called("issue", "create", "--title"))
+        self.assertFalse(h.created())
 
     def test_a_shape_with_an_empty_labels_list_refuses_naming_the_shape(self):
         h = Harness("**Design:** none\n")
@@ -2915,7 +3237,7 @@ class ConfigValidation(unittest.TestCase):
         out = r.stdout + r.stderr
         self.assertIn("no labels", out)
         self.assertIn("work", out)
-        self.assertFalse(h.called("issue", "create", "--title"))
+        self.assertFalse(h.created())
 
     def test_a_shape_missing_the_labels_key_entirely_also_refuses(self):
         h = Harness("**Design:** none\n")
@@ -2932,7 +3254,7 @@ class ConfigValidation(unittest.TestCase):
                   *full_args(h.body_file), "--no-parent", "--top")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("--config", r.stdout + r.stderr)
-        self.assertFalse(h.called("issue", "create", "--title"))
+        self.assertFalse(h.created())
 
     def test_malformed_json_refuses_with_a_clear_error(self):
         h = Harness("**Design:** none\n")
@@ -2973,7 +3295,7 @@ class ConfigValidation(unittest.TestCase):
         self.assertIn("human_review_required", out)
         self.assertIn("agent", out)
         self.assertIn("true or false", out)
-        self.assertFalse(h.called("issue", "create", "--title"))
+        self.assertFalse(h.created())
 
     def test_human_review_required_non_boolean_values_refuse(self):
         # The string "true" is the one a value check (rather than a type
@@ -2985,7 +3307,7 @@ class ConfigValidation(unittest.TestCase):
                 r = h.run(*full_args(h.body_file), "--no-parent", "--top")
                 self.assertNotEqual(r.returncode, 0)
                 self.assertIn("human_review_required", r.stdout + r.stderr)
-                self.assertFalse(h.called("issue", "create", "--title"))
+                self.assertFalse(h.created())
 
 
 class PluckdConfig(unittest.TestCase):
@@ -3015,13 +3337,11 @@ class PluckdConfig(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         create_call = create_argv(h)
         self.assertIsNotNone(create_call)
-        self.assertIn("--repo", create_call)
-        self.assertEqual("jffriend/pluckd",
-                         create_call[create_call.index("--repo") + 1])
-        self.assertIn("bug", create_call)
+        self.assertEqual("repos/jffriend/pluckd/issues", create_call[3])
+        self.assertIn("labels[]=bug", create_call)
         # "needs-joe" is Photos-only vocabulary; it must not leak into a
         # config that never defined it.
-        self.assertNotIn("needs-joe", create_call)
+        self.assertNotIn("labels[]=needs-joe", create_call)
 
     def test_your_run_is_not_a_recognized_shape_under_pluckds_config(self):
         h = Harness("Some body.\n", config=PLUCKD_CONFIG)
@@ -3052,7 +3372,7 @@ class BoardShIntegration(unittest.TestCase):
     """R2/KTD3: board.sh reads the same --config file file_issue.sh reads,
     and its self-check line ('pages=N rows=N distinct=N') is unchanged --
     still written to stderr, still in that shape -- once the underlying
-    GraphQL query is config-driven instead of hardcoding the login and
+    board read is config-driven instead of hardcoding the login and
     project number."""
 
     def _env(self, h):
@@ -3097,6 +3417,248 @@ class BoardShIntegration(unittest.TestCase):
         )
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("owner", r.stderr)
+
+
+class BoardOverRest(unittest.TestCase):
+    """#14 U1: board.sh reads the board through the REST items endpoint,
+    following the `Link` header's `after` cursor itself, so the page count,
+    the 20-page cap and the rows-versus-distinct self-check all survive the
+    move off GraphQL."""
+
+    PAGE1 = [(101, "First thing on the board"), (102, "Second thing"),
+             (103, "Third thing")]
+    PAGE2 = [(104, "Fourth thing"), (105, "Fifth thing"),
+             (106, "Sixth thing")]
+
+    def _board_calls(self, h):
+        return [c for c in h.calls() if any("/items?per_page=" in a for a in c)]
+
+    def _board_sh(self, h):
+        out_path = h.dir / "board_out.json"
+        env = dict(os.environ)
+        env["PATH"] = f"{h.bin}:{env['PATH']}"
+        env["FAKE_GH_DIR"] = str(h.dir)
+        r = subprocess.run(
+            ["bash", str(BOARD_SH), "--config", str(h.config_path), str(out_path)],
+            capture_output=True, text=True, env=env, check=False,
+        )
+        return r, out_path
+
+    def test_a_two_page_board_is_read_in_order(self):
+        h = Harness("**Design:** none\n",
+                    boards=[self.PAGE1 + self.PAGE2],
+                    board_stdouts=[board_page(self.PAGE1, next_cursor="CUR2"),
+                                   board_page(self.PAGE2)])
+        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "103",
+                  "--dry-run")
+        out = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 0, out)
+        # --after 103 sits on the seam: its neighbours above come from page 1
+        # and its neighbours below from page 2, in board order.
+        seen = [out.index("#%d " % n) for n, _ in self.PAGE1 + self.PAGE2]
+        self.assertEqual(sorted(seen), seen, out)
+        self.assertLess(out.index("#103 "), out.index("NEW ISSUE HERE"))
+        self.assertLess(out.index("NEW ISSUE HERE"), out.index("#104 "))
+        calls = self._board_calls(h)
+        self.assertEqual(2, len(calls), calls)
+        self.assertNotIn("after=", " ".join(calls[0]))
+        self.assertIn("after=CUR2", " ".join(calls[1]),
+                      "the second page must be asked for by the next cursor")
+        self.assertIn("-i", calls[0], "the Link header is only seen with -i")
+
+    def test_board_sh_counts_both_pages(self):
+        h = Harness("**Design:** none\n",
+                    board_stdouts=[board_page(self.PAGE1, next_cursor="CUR2"),
+                                   board_page(self.PAGE2)])
+        r, _ = self._board_sh(h)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("pages=2 rows=6 distinct=6", r.stderr)
+
+    def test_repeated_pages_are_a_truncated_board(self):
+        # The cursor did not advance: the same page came back twice.
+        h = Harness("**Design:** none\n",
+                    board_stdouts=[board_page(self.PAGE1, next_cursor="CUR2"),
+                                   board_page(self.PAGE1)])
+        r = h.run(*full_args(h.body_file), "--no-parent", "--top", "--dry-run")
+        out = r.stdout + r.stderr
+        self.assertNotEqual(r.returncode, 0, out)
+        self.assertIn("TRUNCATED BOARD", out)
+        self.assertIn("not trustworthy", out)
+
+    def test_a_failed_page_read_fails_the_run(self):
+        h = Harness("**Design:** none\n",
+                    board_stdouts=[board_page(self.PAGE1, next_cursor="CUR2"),
+                                   board_page(self.PAGE2)],
+                    board_exits=[0, 1])
+        r = h.run(*full_args(h.body_file), "--no-parent", "--top", "--dry-run")
+        out = r.stdout + r.stderr
+        self.assertNotEqual(r.returncode, 0, out)
+        self.assertIn("QUERY FAILED on page 2", out)
+        self.assertIn("not trustworthy", out)
+
+    def test_a_page_that_is_not_an_item_array_fails_the_run(self):
+        # An empty or object-shaped body would otherwise count as zero rows,
+        # and a truncated board reads exactly like a short one.
+        h = Harness("**Design:** none\n",
+                    board_stdouts=["HTTP/2.0 200 OK\n\r\n"
+                                   + json.dumps({"message": "Not an array"})])
+        r = h.run(*full_args(h.body_file), "--no-parent", "--top", "--dry-run")
+        out = r.stdout + r.stderr
+        self.assertNotEqual(r.returncode, 0, out)
+        self.assertIn("QUERY FAILED on page 1", out)
+        self.assertIn("not trustworthy", out)
+
+    def test_a_next_link_without_a_cursor_fails_the_run(self):
+        # Ending the loop there would read a long board as a short one.
+        page = board_page(self.PAGE1, next_cursor="X").replace(
+            "&after=X", "&cursor=X")
+        h = Harness("**Design:** none\n", board_stdouts=[page])
+        r = h.run(*full_args(h.body_file), "--no-parent", "--top", "--dry-run")
+        out = r.stdout + r.stderr
+        self.assertNotEqual(r.returncode, 0, out)
+        self.assertIn("carries no cursor", out)
+
+    def test_a_pull_request_on_the_board_is_not_a_row(self):
+        # The GraphQL listing read a pull request as numberless and dropped
+        # it; the REST listing numbers it, so the row filter is by type.
+        page = json.loads(board_page(self.PAGE1).split("\r\n\r\n", 1)[1])
+        page.append({"id": 1, "node_id": "PVTI_pr", "content_type": "PullRequest",
+                     "content": {"number": 150, "title": "A pull request"},
+                     "fields": []})
+        h = Harness("**Design:** none\n", boards=[self.PAGE1],
+                    board_stdouts=["HTTP/2.0 200 OK\n\r\n" + json.dumps(page)])
+        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "103",
+                  "--dry-run")
+        out = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 0, out)
+        self.assertIn("#103 ", out)
+        self.assertNotIn("#150", out)
+
+    def test_the_page_cap_still_fires(self):
+        # Every page claims a next page; the cap is what stops the loop.
+        h = Harness("**Design:** none\n",
+                    board_stdouts=[board_page(self.PAGE1, next_cursor="SAME")])
+        r = h.run(*full_args(h.body_file), "--no-parent", "--top", "--dry-run")
+        out = r.stdout + r.stderr
+        self.assertNotEqual(r.returncode, 0, out)
+        self.assertIn("PAGE CAP HIT", out)
+        self.assertEqual(20, len(self._board_calls(h)))
+
+    def test_status_is_requested_by_its_numeric_field_id(self):
+        h = Harness("**Design:** none\n")
+        r, out_path = self._board_sh(h)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        calls = self._board_calls(h)
+        self.assertTrue(calls)
+        for call in calls:
+            self.assertIn("fields=%d" % STATUS_FIELD_ID, " ".join(call))
+        items = [i for page in out_path.read_text().split("\n") if page.strip()
+                 for i in json.loads(page)]
+        self.assertEqual(len(DEFAULT_BOARD), len(items))
+        for item in items:
+            status = [f for f in item["fields"] if f["name"] == "Status"]
+            self.assertEqual("Backlog", status[0]["value"]["name"]["raw"])
+
+    def test_a_project_without_a_status_field_omits_the_fields_parameter(self):
+        h = Harness("**Design:** none\n",
+                    fields=[{"id": 77000, "name": "Title", "data_type": "title"}])
+        r, _ = self._board_sh(h)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        calls = self._board_calls(h)
+        self.assertTrue(calls)
+        for call in calls:
+            self.assertNotIn("fields=", " ".join(call))
+
+
+class GraphQLBlocked(unittest.TestCase):
+    """#14 U7: the main flows with EVERY GraphQL call refused (HTTP 403), as in
+    a session whose proxy blocks GraphQL. Filing, adopting, the dry-run and
+    the duplicate stop all still work; only the board position degrades.
+
+    Every test also asserts the only GraphQL call it made was the position
+    write, so a path that reintroduces any other GraphQL call fails here even
+    where its refusal would otherwise be absorbed.
+    """
+
+    def tearDown(self):
+        for call in self.h.calls():
+            joined = " ".join(call)
+            if "graphql" in joined:
+                self.assertIn(POSITION_MATCH, joined,
+                              "a GraphQL call other than the position write: %r"
+                              % call)
+
+    def _create(self, responses, *args, pre=PRE_BOARD, post=None):
+        post = post or [
+            (101, "First thing on the board"),
+            (102, "Second thing"),
+            (103, "Third thing"),
+            (200, "A brand new distinct piece of work"),
+        ]
+        self.h = Harness("**Design:** none\n", boards=[pre, post],
+                         responses=responses, graphql_blocked=True)
+        return self.h.run("--body-file", str(self.h.body_file),
+                          "--shape", "work", *args)
+
+    def test_create_with_a_parent_and_links_files_and_reads_back(self):
+        # Covers R1.
+        r = self._create(create_responses([122], [63], "55"),
+                         "--title", "A brand new distinct piece of work",
+                         "--parent", "55", "--after", "101",
+                         "--blocked-by", "122", "--blocks", "63")
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        out = r.stdout
+        self.assertTrue(self.h.created())
+        self.assertIn("board membership   ok", out)
+        self.assertIn("board position     NOT SET", out)
+        self.assertIn("parent             ok (#55)", out)
+        self.assertIn("blocked-by         ok (122)", out)
+        self.assertIn("blocks             ok (63)", out)
+        self.assertEqual(1, len([c for c in self.h.calls()
+                                 if POSITION_MATCH in " ".join(c)]),
+                         "the position write is tried once, never retried")
+        self.assertIn("--adopt 200 --parent 55 --after 101 --blocked-by 122 "
+                      "--blocks 63", r.stderr)
+
+    def test_adopt_that_writes_one_missing_link_succeeds(self):
+        # Covers R2.
+        self.h = Harness("**Design:** none\n",
+                         boards=[ADOPT_PRE_BOARD, ADOPT_POST_BOARD],
+                         responses=adopt_responses(post_blocked=[122]),
+                         graphql_blocked=True)
+        r = self.h.run(*adopt_args(**{"--blocked-by": "122"}), "--no-parent",
+                       "--after", "101")
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertEqual(
+            [("200/dependencies/blocked_by", "issue_id=%d" % issue_id(122))],
+            link_writes(self.h))
+        self.assertIn("blocked-by         ok (122)", r.stdout)
+        self.assertIn("board position     NOT SET", r.stdout)
+        self.assertIn("#200 is wired", r.stdout)
+
+    def test_dry_run_shows_the_neighbourhood_and_duplicate_check(self):
+        # Covers R3.
+        r = self._create(create_responses([], []),
+                         "--title", "A brand new distinct piece of work",
+                         "--no-parent", "--after", "102",
+                         "--blocked-by", "none", "--blocks", "none", "--dry-run")
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertIn("BOARD NEIGHBOURHOOD", r.stdout)
+        self.assertIn("#101", r.stdout)
+        self.assertIn("#103", r.stdout)
+        self.assertIn("POSSIBLE DUPLICATES: none found", r.stdout)
+        self.assertTrue(wrote_nothing(self.h))
+        self.assertFalse([c for c in self.h.calls() if "graphql" in " ".join(c)])
+
+    def test_possible_duplicates_still_stop_with_exit_3(self):
+        r = self._create(create_responses([], []),
+                         "--title", DUPE_TITLE, "--no-parent", "--after", "101",
+                         "--blocked-by", "none", "--blocks", "none",
+                         pre=DUPE_PRE_BOARD, post=DUPE_POST_BOARD)
+        self.assertEqual(3, r.returncode, r.stdout + r.stderr)
+        self.assertIn("164", r.stdout)
+        self.assertTrue(wrote_nothing(self.h))
+        self.assertFalse([c for c in self.h.calls() if "graphql" in " ".join(c)])
 
 
 if __name__ == "__main__":

@@ -60,20 +60,24 @@ def read_or_raise(path, scan_name):
 
 CASE_ARM = re.compile(r"^\s*(-[A-Za-z0-9|_-]+)\)")
 
-# `file_issue.sh` prints these `gh issue edit` flags back to the caller
-# as the remedy for a link it refuses to reconcile. They are gh's flags, not
-# the script's, so they cannot be parser arms.
-GH_REMEDY_FLAGS = ("--remove-parent", "--remove-blocked-by", "--remove-blocking")
+# `file_issue.sh` prints these REST endpoint tails back to the caller as the
+# remedy for a link it refuses to reconcile (#14 KTD9): removing a parent, and
+# removing a blocked-by link -- which, run against the blocked issue, is also
+# how a blocks link is removed. They are GitHub's paths, not the script's
+# flags, so they cannot be parser arms.
+GH_REMEDY_FLAGS = ("/sub_issue -F sub_issue_id=", "/dependencies/blocked_by/")
 
-# The remedy is CONSTRUCTED on a line naming the issue being adopted. Matching
-# that construction is what keeps this allowlist honest.
+# The remedy is CONSTRUCTED on a line that runs a REST delete against an issue
+# in a repo the script names by variable -- the configured one, or for a blocks
+# link the blocked issue's own. Matching that construction is what keeps this
+# allowlist honest.
 #
 # The earlier version tested `flag in script_text` -- membership in the whole
 # file, comments included -- and claimed in its own comment that this meant
 # the list "cannot be used to smuggle in a flag nothing accepts". It could:
 # `--repo`, `--label`, `--json`, `--limit`, `--owner` and `--url` all appear
 # somewhere in the script without being parser arms.
-REMEDY_CONSTRUCTION = "gh issue edit $ADOPT"
+REMEDY_CONSTRUCTION = "gh api -X DELETE repos/$"
 
 
 def printed_as_a_remedy(flag, script_text):
@@ -139,9 +143,11 @@ class FlagsMatchTheScript(unittest.TestCase):
     def test_the_gh_remedy_flags_are_only_allowed_because_the_script_prints_them(self):
         """Printed as a remedy, not merely spelled somewhere in the file.
 
-        All three flags also appear in the capability probe's required-flag
-        string, so asserting mere presence stayed green even with every remedy
-        print site deleted -- the test was named for a thing it did not check.
+        The old `--remove-*` flags also appeared in the old capability probe's
+        required-flag string, so asserting mere presence stayed green even with
+        every remedy print site deleted -- the test was named for a thing it
+        did not check. The REST paths appear in comments and in the writes
+        too, so the same holds for them.
         """
         script_text = read_or_raise(FILE_ISSUE, "remedy-flag check")
         for flag in GH_REMEDY_FLAGS:
@@ -155,13 +161,13 @@ class FlagsMatchTheScript(unittest.TestCase):
         """The claim the old comment made and the code did not keep.
 
         The old test was `flag in script_text` -- membership in the whole file,
-        comments included. `--label`, `--json`, `--limit` and `--url` all appear
+        comments included. `-X POST`, `/sub_issues` and `-F issue_id=` all appear
         somewhere in the script without being parser arms or remedies, which is
         exactly the set a hand-rolled reimplementation needs. Being printed on a
         runnable remedy line is the property that matters.
         """
         script_text = read_or_raise(FILE_ISSUE, "remedy-flag check")
-        for flag in ("--label", "--json", "--limit"):
+        for flag in ("-X POST", "/sub_issues", "-F issue_id="):
             self.assertIn(flag, script_text,
                           "precondition: %s appears somewhere in the script" % flag)
             self.assertFalse(

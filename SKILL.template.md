@@ -74,19 +74,26 @@ than a small fix, or needs a decision you cannot make here.
 
 Do not create or edit an issue, and do not touch the project board, with the
 GitHub CLI directly. Not `gh issue create`, not `gh issue edit`, not any
-`gh project` command. They write what you asked for and stop, leaving every
-other relationship for a later step that may not come. That is not a style
-preference — it is the reason this tool exists: a written rule alone did not
+`gh project` command, and not their `gh api` equivalents. They write what
+you asked for and stop, leaving every other relationship for a later step
+that may not come. That is not a style preference — it is the reason this tool exists: a written rule alone did not
 hold, in a session that had just read it.
 
 This skill never writes to the board itself. It drives the engine, and the
 engine does every write.
 
 **One exception, named so it does not have to be guessed at.** Posting a
-*comment* on an issue is permitted — `gh issue comment` — because a comment
-creates no issue and touches no board field, and Step 4 uses it to add
-details to an issue that already covers the work. The ban covers creating an issue, editing one, and touching the
-project board.
+*comment* on an issue is permitted, because a comment creates no issue and
+touches no board field. Post it over REST, which works in a cloud session
+where `gh issue comment` does not:
+
+```bash
+gh api -X POST repos/<owner>/<repo>/issues/<N>/comments -F body=@comment.md
+```
+
+`<owner>/<repo>` is the `repo` value in {{CONFIG_PATH}}. Step 4 uses a
+comment to add details to an issue that already covers the work. The ban
+covers creating an issue, editing one, and touching the project board.
 
 ## Before you comment: does the comment correct the body?
 
@@ -101,10 +108,15 @@ the body saying it was rewritten and why, and leave the comments as the
 record with *where they disagree with the body, the body wins.*
 
 This engine cannot do that edit: adopt mode refuses `--body-file`, because an
-issue that already exists has a body. So the body edit is a bare
-`gh issue edit`, the one board write this skill sends you elsewhere for,
-rather than the one it lets you skip. See {{CONVENTIONS_DOC}} for your repo's
-narrow exception for a label-only correction, if it has one.
+issue that already exists has a body. So the body edit is a direct
+REST call, the one issue write this skill sends you elsewhere for, rather
+than the one it lets you skip:
+
+```bash
+gh api -X PATCH repos/<owner>/<repo>/issues/<N> -F body=@body.md
+```
+
+See {{CONVENTIONS_DOC}} for your repo's narrow exception for a label-only correction, if it has one.
 
 Why it matters: GitHub renders the body first and above the fold, so a
 superseded instruction left standing in the body is the one in the reading
@@ -248,7 +260,8 @@ exits 3. Read each match and judge it yourself. Do not stop the session for
 it.
 
 - **You are confident it is the same work.** File nothing. Add the new
-  details as a comment on the existing issue with `gh issue comment`, and tell
+  details as a comment on the existing issue (the REST command under "The one
+rule"), and tell
   the caller which issue you commented on.
 - **You are not sure.** File nothing. Tell the caller the matches by number
   and title, and offer to file anyway, which means re-running the same command
@@ -278,9 +291,19 @@ it.** When the issue moved, the engine prints a `move recorded` line. If
 instead it prints `WARNING: the move LANDED but recording it FAILED`, the
 wiring is correct and there is nothing to undo — but the slot the issue came
 from is written down nowhere, and the run still exits 0. Post the comment body
-the engine printed, with `gh issue comment`, then tell the caller it failed
+the engine printed, with the REST comment command under "The one rule", then
+tell the caller it failed
 and that you posted it by hand. Never treat a zero exit as evidence the move
 record landed.
+
+**A third outcome in either mode: `board position NOT SET`.** Where GitHub
+refuses GraphQL (a Claude Code cloud session, for one), the engine cannot set
+the board position. It still files and wires the issue, reads everything back,
+and exits 0, but the read-back says `board position     NOT SET` and a
+`BOARD POSITION NOT SET` notice prints an adopt command. Quote that notice to
+the caller, say the issue is on the board but not in the position asked for,
+and give them the command to run from a local session. No move comment is
+written in this case; do not post one by hand.
 
 ## What this skill does not cover
 

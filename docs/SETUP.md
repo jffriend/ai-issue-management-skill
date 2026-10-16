@@ -60,7 +60,7 @@ You'll do five things: add this repo's code to yours, tell it which board and re
 | `repo` | string | `OWNER/NAME` of the GitHub repository issues are created in. |
 | `owner` | string | The GitHub login that owns the project board (usually the same as the repo owner, but Projects v2 boards are owned independently of any one repo). |
 | `project_number` | integer | The project board's number, as shown in its URL (`.../projects/<N>`). |
-| `project_id` | string | The project board's GraphQL node ID — needed to write items to it. Find it with `gh project view <project_number> --owner <owner> --format json` (or the GraphQL API) and paste the `id` field. |
+| `project_id` | string | The project board's GraphQL node ID. It is used only to set an issue's board position, the one write that still goes through GraphQL; everything else uses `project_number`. Find it with `gh project view <project_number> --owner <owner> --format json` and paste the `id` field. |
 | `shapes` | array of `{name, labels}` | Your issue-type vocabulary. Each entry's `name` is a valid value for `--shape`; `labels` is the list of GitHub labels applied when an issue of that shape is created. At least one shape is required, and every shape needs at least one label. |
 | `plan_dir` | string | The directory (repo-relative) that plan documents live in — used to recognize a `Design:` line in an issue body as pointing at a real plan. Required if `design_line_required` is `true`; otherwise unused. |
 | `design_line_required` | boolean | Whether a plan-derived issue (one whose body carries a `Design:` line into `plan_dir`) is required to have a parent. Set `false` if your repo has no such convention. |
