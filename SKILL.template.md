@@ -287,6 +287,14 @@ mode on only if the proxy refuses it again; if the board reads fine it refuses
 broken, not out of reach: never add `--no-board` for it. This is the one
 exception to "never work around a refusal".
 
+The same missing signal can show up earlier: in a cloud session, a run you
+gave `--position-later` stops with "--position-later is for cloud mode only"
+before it reads the board. Re-run it with `--no-board` added. The engine then
+reads the board itself and keeps cloud mode only if the proxy refuses it, so
+the proxy's refusal is still the trigger. If the engine instead refuses
+`--no-board` because it read the board, this session can see the board: ask
+the caller for `--after N` or `--top` and run it as a local filing.
+
 ## Step 4 — exit 3: possible duplicates
 
 A create run that finds possible duplicates prints them, creates nothing, and
