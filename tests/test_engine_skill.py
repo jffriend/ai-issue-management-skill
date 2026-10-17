@@ -196,5 +196,15 @@ class FailClosed(unittest.TestCase):
             parser_flags(self._script_copy(gutted))
 
 
+class TemplateFillsCleanly(unittest.TestCase):
+    """A literal fill of SKILL.template.md, in the guide's own example form, reads correctly."""
+
+    def test_no_article_doubles_before_the_board_name(self):
+        text = read_or_raise(REPO / "SKILL.template.md", "template scan")
+        self.assertIn('e.g. "the', text, "the guide's example value starts with 'the'")
+        filled = text.replace("{{BOARD_NAME}}", "the Pluckd Roadmap board (project #1)")
+        self.assertNotRegex(filled, r"(?i)\bthe the\b")
+
+
 if __name__ == "__main__":
     unittest.main()

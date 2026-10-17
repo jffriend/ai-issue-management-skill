@@ -1,6 +1,6 @@
 ---
 name: file-issue
-description: Put work on the {{BOARD_NAME}} — file a new issue, or wire an issue that already exists. Use this whenever an issue needs creating, whenever outstanding work has to go on the board, whenever a plan files or adopts its unit issues, and any time you are about to reach for the GitHub CLI to create an issue or put one on the board. Drives {{FILE_ISSUE_CMD}}, which is the only supported way to write to the board.
+description: Put work on {{BOARD_NAME}} — file a new issue, or wire an issue that already exists. Use this whenever an issue needs creating, whenever outstanding work has to go on the board, whenever a plan files or adopts its unit issues, and any time you are about to reach for the GitHub CLI to create an issue or put one on the board. Drives {{FILE_ISSUE_CMD}}, which is the only supported way to write to the board.
 argument-hint: [what the issue is about, or "adopt <N>"]
 ---
 
