@@ -27,7 +27,7 @@ You'll do five things: add this repo's code to yours, tell it which board and re
    - For a Claude Code project, that's typically `.claude/skills/file-issue/SKILL.md`.
    - The template's own header comment names every placeholder it needs filled in.
    - `{{BOARD_NAME}}` — a short name for your project's board, e.g. "the Roadmap board" or "project board #1".
-   - `{{FILE_ISSUE_CMD}}` — the exact command your repo uses to invoke the engine, e.g. `bash scripts/file_issue.sh`.
+   - `{{FILE_ISSUE_CMD}}` — the exact command your repo uses to invoke the engine, e.g. `bash scripts/file_issue.sh`. Put the same value in your config's `file_issue_cmd`.
    - `{{CONFIG_PATH}}` — the repo-relative path to your own `config.json`, e.g. `scripts/file-issue.config.json`. Needed even when `{{FILE_ISSUE_CMD}}` is a wrapper that hides this path, because the skill reads `human_review_required` from it directly.
    - `{{SHAPES_LIST}}` — the shape names and a one-line meaning of each, copied from the `shapes` list in your own `config.json`.
    - `{{CONVENTIONS_DOC}}` — the path to your own repo's conventions doc, the place that documents issue-body shape and how ordering constraints get recorded.
@@ -64,6 +64,7 @@ You'll do five things: add this repo's code to yours, tell it which board and re
 | `shapes` | array of `{name, labels}` | Your issue-type vocabulary. Each entry's `name` is a valid value for `--shape`; `labels` is the list of GitHub labels applied when an issue of that shape is created. At least one shape is required, and every shape needs at least one label. |
 | `plan_dir` | string | The directory (repo-relative) that plan documents live in — used to recognize a `Design:` line in an issue body as pointing at a real plan. Required if `design_line_required` is `true`; otherwise unused. |
 | `design_line_required` | boolean | Whether a plan-derived issue (one whose body carries a `Design:` line into `plan_dir`) is required to have a parent. Set `false` if your repo has no such convention. |
+| `file_issue_cmd` | string | The command your repo runs the engine with, the same value as the skill's `{{FILE_ISSUE_CMD}}`, e.g. `bash scripts/file_issue.sh`. Every follow-up command the engine prints starts with it. Optional; without it those commands name the engine's own path and `--config` path, which in a cloud session exist only in that session, so a local session cannot run the placement command a cloud filing prints. |
 | `human_review_required` | boolean | Whether a person approves a preview before each filing. `true` (a human has to say yes to the `--dry-run` preview) or `false` (the agent files in one run). Optional — defaults to `true` if omitted. See `docs/CONCEPTS.md` for what each value does. |
 
 Cloud mode, for filing from a Claude Code cloud session, needs no extra config. It labels each cloud-filed issue `needs-board`. If GitHub does not create that label on first use in your repo, create it once (`gh label create needs-board`) so cloud filings can carry it.

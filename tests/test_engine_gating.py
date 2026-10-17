@@ -3805,6 +3805,22 @@ class CloudModeLabel(unittest.TestCase):
         self.assertNotIn("--position-later", command[0])
         self.assertNotIn("--no-board", command[0])
 
+    def test_the_cloud_notice_names_the_configured_command_not_cloud_paths(self):
+        # The script and --config paths are the cloud session's own and do
+        # not exist on the local machine the notice is addressed to (#30).
+        config = dict(PHOTOS_CONFIG, file_issue_cmd="bash scripts/file_issue.sh")
+        self.h = Harness("**Design:** none\n", board_refused=True,
+                         responses=cloud_create_responses(), config=config)
+        r = self.h.run(*full_args(self.h.body_file), "--no-parent",
+                       "--position-later", env=CLOUD_ENV)
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        command = [line for line in r.stderr.splitlines()
+                   if "--adopt 200" in line]
+        self.assertEqual(1, len(command), r.stderr)
+        self.assertEqual(
+            "  bash scripts/file_issue.sh --adopt 200 --no-parent "
+            "(--after N | --top) --blocked-by none --blocks none", command[0])
+
     def test_a_cloud_adopt_of_a_labeled_issue_writes_no_label(self):
         # Covers AE4.
         r = self._cloud(adopt_responses(pre_parent=55, post_parent=55,

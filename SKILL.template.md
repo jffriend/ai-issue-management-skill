@@ -18,6 +18,9 @@ argument-hint: [what the issue is about, or "adopt <N>"]
                             file_issue.sh with your --config baked in) or,
                             with no wrapper:
                               bash path/to/ai-issue-management-skill/file_issue.sh --config path/to/your-config.json
+                            Put the same value in your config's
+                            `file_issue_cmd`, so the commands the engine
+                            prints for a later run start with it too.
     {{CONFIG_PATH}}       — the repo-relative path to your own config.json
                             (e.g. scripts/file-issue.config.json). Needed
                             even when {{FILE_ISSUE_CMD}} is a wrapper that
@@ -72,20 +75,31 @@ than a small fix, or needs a decision you cannot make here.
 
 ## The one rule
 
-Do not create or edit an issue, and do not touch the project board, with the
-GitHub CLI directly. Not `gh issue create`, not `gh issue edit`, not any
+Do not create an issue, and do not set where one sits, with the GitHub CLI
+directly. Where an issue sits is its board membership and position, its
+parent, and its blocked-by and blocks links. Not `gh issue create`, not
+`gh issue edit` with `--parent`, `--add-project`, `--remove-project`, or a
+blocked-by or blocking flag, not any
 `gh project` command, and not their `gh api` equivalents. They write what
 you asked for and stop, leaving every other relationship for a later step
 that may not come. That is not a style preference — it is the reason this tool exists: a written rule alone did not
 hold, in a session that had just read it.
 
 This skill never writes to the board itself. It drives the engine, and the
-engine does every write.
+engine does every placement write. The one exception is a `gh api -X DELETE`
+the engine prints to clear a link adopt refused. Run it only when the caller
+has decided that link should go, then re-run the adopt so its read-back
+confirms what is left.
 
-**One exception, named so it does not have to be guessed at.** Posting a
-*comment* on an issue is permitted, because a comment creates no issue and
-touches no board field. Post it over REST, which works in a cloud session
-where `gh issue comment` does not:
+**Editing an existing issue's title, body or labels is outside this rule**
+until the engine supports those edits. Follow {{CONVENTIONS_DOC}} for them.
+Two limits stay: do not add or remove the `needs-board` label by hand
+(Step 5 says how it is handled), and do not change a shape's labels on an
+issue the engine filed.
+
+**Comments are permitted too, named so it does not have to be guessed at.**
+A comment creates no issue and touches no board field. Post it over REST,
+which works in a cloud session where `gh issue comment` does not:
 
 ```bash
 gh api -X POST repos/<owner>/<repo>/issues/<N>/comments -F body=@comment.md
@@ -93,7 +107,7 @@ gh api -X POST repos/<owner>/<repo>/issues/<N>/comments -F body=@comment.md
 
 `<owner>/<repo>` is the `repo` value in {{CONFIG_PATH}}. Step 4 uses a
 comment to add details to an issue that already covers the work. The ban
-covers creating an issue, editing one, and touching the project board.
+covers creating an issue and setting where it sits.
 
 ## Before you comment: does the comment correct the body?
 
@@ -109,8 +123,7 @@ record with *where they disagree with the body, the body wins.*
 
 This engine cannot do that edit: adopt mode refuses `--body-file`, because an
 issue that already exists has a body. So the body edit is a direct
-REST call, the one issue write this skill sends you elsewhere for, rather
-than the one it lets you skip:
+REST call, which works in a cloud session too:
 
 ```bash
 gh api -X PATCH repos/<owner>/<repo>/issues/<N> -F body=@body.md
@@ -199,8 +212,7 @@ The full rules, and why each question has no default, are in
 **Adopt mode refuses rather than reconciles.** If the issue is closed, sits
 under a different parent, or carries a blocked-by or blocks link this
 invocation did not name, it stops before writing anything and prints the
-exact `--remove-parent` / `--remove-blocked-by` / `--remove-blocking` command
-that clears what it found. Note the shape of that: a link that already exists
+exact `gh api -X DELETE ...` command that clears each link it found. Note the shape of that: a link that already exists
 must be *named in your answer* or explicitly cleared. A closed blocker still
 counts as a link.
 
@@ -304,7 +316,16 @@ it.
 - **You are confident it is the same work.** File nothing. Add the new
   details as a comment on the existing issue (the REST command under "The one
 rule"), and tell
-  the caller which issue you commented on.
+  the caller which issue you commented on. Then check that the match is on
+  the board: build an adopt of it (Step 2) with the placement answers you
+  already have for this work, and run it with `--dry-run`. If it refuses
+  because the match has links you did not name, add those links to your
+  answers and dry-run again; never run the `DELETE` commands it prints, as
+  those links belong to the match. If its position line says `not currently
+  on the board`, run that adopt the way Step 3 says, so the work is on the
+  board. If it names a current position, the match is on the board: do not
+  run the adopt. In a cloud session the board cannot be read: tell the
+  caller to check from a local session.
 - **You are not sure.** File nothing. Tell the caller the matches by number
   and title, and offer to file anyway, which means re-running the same command
   with `--file-anyway`. Then carry on with the session's other work.

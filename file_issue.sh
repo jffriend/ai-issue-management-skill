@@ -222,6 +222,7 @@ OWNER="$(jq -r '.owner // empty' "$CONFIG")"
 PROJECT_NUMBER="$(jq -r '.project_number // empty' "$CONFIG")"
 PROJECT_ID="$(jq -r '.project_id // empty' "$CONFIG")"
 PLAN_DIR="$(jq -r '.plan_dir // empty' "$CONFIG")"
+FILE_ISSUE_CMD="$(jq -r '.file_issue_cmd // empty' "$CONFIG")"
 DESIGN_LINE_REQUIRED="$(jq -r 'if (.design_line_required // false) then "true" else "false" end' "$CONFIG")"
 # Check the type: jq's // treats false as absent, and a string "true" would pass a value check.
 HUMAN_REVIEW_TYPE="$(jq -r 'if has("human_review_required") then (.human_review_required | type) else "boolean" end' "$CONFIG")"
@@ -787,7 +788,7 @@ half_wired_head() {
 }
 
 reverify_command() {
-  # The adopt re-run: safe on a wired issue, REST-only, uses this run's paths; $1 overrides the position answer.
+  # The adopt re-run: safe on a wired issue, REST-only, led by file_issue_cmd or this run's paths; $1 overrides the position answer.
   local position="${1-}"
   if [ -z "$position" ]; then
     if [ "$CLOUD" -eq 1 ]; then
@@ -799,8 +800,10 @@ reverify_command() {
       position="--after $AFTER"
     fi
   fi
-  printf '  bash %q --config %q --adopt %s %s %s --blocked-by %s --blocks %s\n' \
-    "${BASH_SOURCE[0]}" "$CONFIG" \
+  local cmd="$FILE_ISSUE_CMD"
+  [ -n "$cmd" ] || cmd="$(printf 'bash %q --config %q' "${BASH_SOURCE[0]}" "$CONFIG")"
+  printf '  %s --adopt %s %s %s --blocked-by %s --blocks %s\n' \
+    "$cmd" \
     "$NUM" \
     "$( [ -n "$PARENT" ] && printf -- '--parent %s' "$PARENT" || printf -- '--no-parent' )" \
     "$position" \
