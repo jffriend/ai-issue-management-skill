@@ -78,7 +78,7 @@ Any multi-step plan goes to `temp_plans/<descriptive-name>.md` before doing
 anything else, so it survives a crash. `ce-plan` and `ce-brainstorm` write
 their own durable plans to `docs/plans/`.
 
-## Toolset
+## Coding standards
 
-`bash`, `jq`, `python3`, and `gh` (authenticated). No project-specific
-tooling beyond that — see `README.md`.
+@CODING_STANDARDS.md
+When a coherent unit of work is done, run /ce-simplify-code once. Skip it for docs-only or mechanical changes, and don't run it after every edit.
