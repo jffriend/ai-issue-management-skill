@@ -306,7 +306,13 @@ it.
 - **You are confident it is the same work.** File nothing. Add the new
   details as a comment on the existing issue (the REST command under "The one
 rule"), and tell
-  the caller which issue you commented on.
+  the caller which issue you commented on. Then check that the match is on
+  the board: build an adopt of it (Step 2) with the placement answers you
+  already have for this work, and run it with `--dry-run`. If its position
+  line says `not currently on the board`, run that adopt the way Step 3
+  says, so the work is on the board. If the line says it is already on the
+  board, leave it where it is. In a cloud session the board cannot be read:
+  tell the caller to check from a local session.
 - **You are not sure.** File nothing. Tell the caller the matches by number
   and title, and offer to file anyway, which means re-running the same command
   with `--file-anyway`. Then carry on with the session's other work.
