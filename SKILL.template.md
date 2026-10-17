@@ -202,8 +202,7 @@ The full rules, and why each question has no default, are in
 **Adopt mode refuses rather than reconciles.** If the issue is closed, sits
 under a different parent, or carries a blocked-by or blocks link this
 invocation did not name, it stops before writing anything and prints the
-exact `--remove-parent` / `--remove-blocked-by` / `--remove-blocking` command
-that clears what it found. Note the shape of that: a link that already exists
+exact `gh api -X DELETE ...` command that clears each link it found. Note the shape of that: a link that already exists
 must be *named in your answer* or explicitly cleared. A closed blocker still
 counts as a link.
 
