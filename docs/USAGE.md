@@ -83,14 +83,14 @@ Nothing is created and nothing is changed at this point. Run the same command wi
 
 **A Claude Code cloud session can file and adopt issues, but it can't touch the project board. The issue is labelled `needs-board` and placed later from a local session.**
 
-The cloud session's GitHub proxy refuses the board itself, not only GraphQL. So the tool runs in **cloud mode** there. It turns on by itself when the session sets `CLAUDE_CODE_REMOTE=true`, or with `--no-board` in any session. A board read that fails never turns it on: in a local session that still stops the run.
+The cloud session's GitHub proxy refuses the board itself, not only GraphQL. So the tool runs in **cloud mode** there. It turns on by itself when the session sets `CLAUDE_CODE_REMOTE=true`. In a cloud session without that setting, use `--no-board`: the tool reads the board first and turns cloud mode on only if the cloud proxy refuses it ("sessions are bound to their configured repositories"). If the board reads fine, `--no-board` is refused. Any other board failure stops the run, as it does in a local session.
 
 In cloud mode:
 
 - The position answer is `--position-later`. `--after` and `--top` are refused, because nothing could check them.
 - The run creates or adopts the issue, checks for duplicates, writes the parent and blocking links, and labels it `needs-board` (in the create itself, or added on adopt if it's missing).
 - It reads all of that back. The two board lines say `not checked (cloud mode)`.
-- It exits 0 and ends by saying the issue is NOT on the board yet, with the local adopt command that places it.
+- It exits 0 and ends by saying the board was not checked, with the local adopt command that places it. The issue may already be on the board at a spot nobody chose: a board can add sub-issues to its bottom automatically, and an adopted issue may already be placed.
 - `--dry-run` shows the duplicate check and the summary. There's no board neighborhood.
 
 ```bash

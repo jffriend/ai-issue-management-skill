@@ -3803,6 +3803,53 @@ class CloudModeSwitch(unittest.TestCase):
         self.assertIn("--no-board", lines[cloud[0]])
 
 
+class NoBoardNeedsTheProxyRefusal(unittest.TestCase):
+    """#14 R2: --no-board turns cloud mode on only once the board read is
+    refused with the cloud proxy's own message. A readable board refuses the
+    flag, and any other board failure still stops the run (R3)."""
+
+    def test_a_readable_board_refuses_no_board(self):
+        h = Harness("**Design:** none\n", responses=create_responses([], []))
+        r = h.run(*full_args(h.body_file), "--no-parent", "--no-board",
+                  "--position-later")
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        self.assertIn("--no-board", r.stderr)
+        self.assertIn("--after", r.stderr)
+        self.assertNotIn("cloud mode        on", r.stdout)
+        self.assertTrue(wrote_nothing(h))
+
+    def test_another_board_failure_stops_as_untrustworthy(self):
+        h = Harness("**Design:** none\n", board_exits=[1],
+                    responses=create_responses([], []))
+        r = h.run(*full_args(h.body_file), "--no-parent", "--no-board",
+                  "--position-later")
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        self.assertIn("the board listing is not trustworthy", r.stderr)
+        self.assertNotIn("cloud mode        on", r.stdout)
+        self.assertTrue(wrote_nothing(h))
+
+    def test_the_proxy_refusal_turns_cloud_mode_on(self):
+        h = Harness("**Design:** none\n", board_refused=True,
+                    responses=cloud_create_responses())
+        r = h.run(*full_args(h.body_file), "--no-parent", "--no-board",
+                  "--position-later")
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertIn("cloud mode        on (--no-board", r.stdout)
+        self.assertIn("needs-board        ok (present)", r.stdout)
+        create = create_argv(h)
+        self.assertIn("labels[]=%s" % PENDING_LABEL, create)
+
+    def test_a_half_wired_no_board_run_hands_back_no_board(self):
+        # The recovery command is re-run from the same session, which still
+        # has no environment signal, so it must carry --no-board too.
+        h = Harness("**Design:** none\n", board_refused=True,
+                    responses=cloud_create_responses())
+        r = h.run(*full_args(h.body_file), "--parent", "55", "--no-board",
+                  "--position-later")
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        self.assertIn("--no-board --position-later", r.stderr)
+
+
 class CloudModeSkipsTheBoard(unittest.TestCase):
     """#14 U2: a cloud run never touches the board or GraphQL (R10), says so
     in its read-back (R13) and its dry run (R11), and a local run whose board
@@ -3896,8 +3943,24 @@ class CloudModeLabel(unittest.TestCase):
         self.assertIn("blocks             ok (122)", r.stdout)
         self.assertIn("needs-board        ok (present)", r.stdout)
         self.assertIn("#200 is created", r.stdout)
-        self.assertIn("NOT on the board", r.stdout)
-        self.assertIn("NOT ON THE BOARD", r.stderr)
+        # Project 3 auto-adds sub-issues, so "not on the board" could be
+        # false: the run says only what it knows (#14 R14).
+        self.assertIn("the board was not checked", r.stdout)
+        self.assertIn("may already be on it", r.stdout)
+        self.assertNotIn("NOT on the board", r.stdout)
+        self.assertIn("BOARD NOT CHECKED", r.stderr)
+        self.assertIn("local session", r.stderr)
+
+    def test_the_cloud_notice_leaves_the_position_to_the_local_session(self):
+        r = self._cloud(cloud_create_responses(), "--no-parent",
+                        "--position-later", create={})
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        command = [line for line in r.stderr.splitlines()
+                   if "--adopt 200" in line]
+        self.assertEqual(1, len(command), r.stderr)
+        self.assertIn("(--after N | --top)", command[0])
+        self.assertNotIn("--position-later", command[0])
+        self.assertNotIn("--no-board", command[0])
 
     def test_a_cloud_adopt_of_a_labeled_issue_writes_no_label(self):
         # Covers AE4.

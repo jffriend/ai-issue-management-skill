@@ -84,14 +84,18 @@
 #
 #   CLOUD MODE (a Claude Code cloud session). The session's GitHub proxy
 #   refuses the project board itself, so the board cannot be read, added to
-#   or placed on. Cloud mode turns on when CLAUDE_CODE_REMOTE=true, or with
-#   --no-board in any session; a refused board read never turns it on. It
+#   or placed on. Cloud mode turns on when CLAUDE_CODE_REMOTE=true. Without
+#   it, --no-board reads the board first and turns cloud mode on only if the
+#   read is refused with the cloud proxy's "sessions are bound to their
+#   configured repositories" message; a readable board refuses --no-board,
+#   and any other failed read stops the run as it does locally. Cloud mode
 #   skips every board call, takes --position-later as the position answer
 #   (--after and --top are refused, since nothing could check them), runs the
 #   duplicate check, writes the parent and both kinds of blocking link, and
 #   labels the issue needs-board. It reads all of that back, prints the two
 #   board lines as "not checked (cloud mode)", and ends with a notice that the
-#   issue is not on the board yet. --dry-run shows the duplicate check and the
+#   board was not checked: the issue may already be on it at a spot nobody
+#   chose, since sub-issues can be added automatically. --dry-run shows the duplicate check and the
 #   summary; there is no board neighbourhood. Place the issue later with a
 #   local adopt naming --after N or --top; once that placement reads back,
 #   the adopt removes the needs-board label.
@@ -245,15 +249,20 @@ FILE_ANYWAY=0
 # answer as "decided later", and labels the issue BOARD_PENDING_LABEL so a
 # local session can find it and place it.
 #
-# It is turned on ONLY by the session's own environment or by --no-board,
-# never by a failed board read: a local token without board access must still
-# stop at "the board listing is not trustworthy" rather than quietly file off
-# the board (docs/solutions/best-practices/the-exemption-that-makes-a-guard-
-# writable-is-the-hole.md).
+# It is turned on by the session's own environment, or by --no-board once the
+# board read is refused with the cloud proxy's own message (CLOUD_PROXY_REFUSAL).
+# Never by any other failed board read: a local token without board access
+# must still stop at "the board listing is not trustworthy" rather than
+# quietly file off the board (docs/solutions/best-practices/the-exemption-
+# that-makes-a-guard-writable-is-the-hole.md). And never by --no-board alone:
+# a flag honoured in any session would be exactly that exemption, so a board
+# that reads fine refuses it (#14 R2).
 NO_BOARD=0
 POSITION_LATER=0
 CLOUD=0
 CLOUD_REASON=""
+CLOUD_UNCONFIRMED=0   # --no-board without the environment: proven at the board read
+CLOUD_PROXY_REFUSAL="sessions are bound to their configured repositories"
 BOARD_PENDING_LABEL="needs-board"
 FOUND_LABEL=""   # adopt: whether the issue already carries BOARD_PENDING_LABEL
 
@@ -334,6 +343,10 @@ if [ "${CLAUDE_CODE_REMOTE:-}" = "true" ]; then
   CLOUD_REASON="CLAUDE_CODE_REMOTE=true"
 fi
 if [ "$NO_BOARD" -eq 1 ]; then
+  # The position answers are checked as cloud-mode answers from here, offline.
+  # Without the environment, the board read below must still prove the board
+  # is refused by the cloud proxy before anything is written.
+  [ "$CLOUD" -eq 1 ] || CLOUD_UNCONFIRMED=1
   CLOUD=1
   CLOUD_REASON="${CLOUD_REASON:+$CLOUD_REASON and }--no-board"
 fi
@@ -602,7 +615,7 @@ probe_gh_capability() {
   echo "gh capability     ok (gh $GH_VERSION)"
 }
 
-if [ "$CLOUD" -eq 1 ]; then
+if [ "$CLOUD" -eq 1 ] && [ "$CLOUD_UNCONFIRMED" -eq 0 ]; then
   echo "cloud mode        on ($CLOUD_REASON): the board is not read or written"
 fi
 probe_gh_capability
@@ -627,6 +640,31 @@ trap cleanup EXIT
 gh_api() { gh api "$@" 2>"$GH_API_ERR"; }
 gh_api_failed_with() { grep -qF "(HTTP $1)" "$GH_API_ERR"; }
 gh_api_err() { tr '\n' ' ' <"$GH_API_ERR"; }
+
+board_untrusted() {
+  # Why a failed board read stops the run. $BOARD_ERR holds board.sh's stderr.
+  printf 'ERROR: the board listing is not trustworthy — %s\n' "$(tr '\n' ' ' <"$BOARD_ERR")" >&2
+  printf 'A truncated board reads exactly like a short one. Refusing to go on.\n' >&2
+}
+
+# --no-board without the environment signal (#14 R2). One board read decides:
+# refused with the cloud proxy's message, this is a cloud session and cloud
+# mode stands; readable, this session can see the board, so --no-board is
+# refused; failed any other way, the run stops exactly as a local run does.
+if [ "$CLOUD_UNCONFIRMED" -eq 1 ]; then
+  if bash "$SCRIPT_DIR/board.sh" --config "$CONFIG" "$BOARD_JSON" 2>"$BOARD_ERR"; then
+    die "REFUSED: --no-board is for a session whose board read is refused by the
+       Claude Code cloud proxy. This session read the board, so it must check
+       the position against it: drop --no-board and --position-later and pass
+       --after <N> or --top. $NOTHING"
+  fi
+  if ! grep -qF "$CLOUD_PROXY_REFUSAL" "$BOARD_ERR"; then
+    board_untrusted
+    exit 1
+  fi
+  CLOUD_REASON="--no-board, and the cloud proxy refused the board"
+  echo "cloud mode        on ($CLOUD_REASON): the board is not read or written"
+fi
 
 issue_numeric_id() {
   # $1 an issue number. Prints the issue's numeric REST `id` -- what the
@@ -859,8 +897,7 @@ read_board() {
   # numberless, and the REST one gives a pull request a number.
   local out="$1"
   if ! bash "$SCRIPT_DIR/board.sh" --config "$CONFIG" "$out" 2>"$BOARD_ERR"; then
-    printf 'ERROR: the board listing is not trustworthy — %s\n' "$(tr '\n' ' ' <"$BOARD_ERR")" >&2
-    printf 'A truncated board reads exactly like a short one. Refusing to go on.\n' >&2
+    board_untrusted
     return 1
   fi
   jq -s -r '[.[][]]
@@ -1834,17 +1871,21 @@ fi
 echo
 DONE_VERB="$( [ "$MODE" = adopt ] && echo wired || echo created )"
 if [ "$CLOUD" -eq 1 ]; then
-  echo "#$NUM is $DONE_VERB and every relationship read back matching, but it is NOT on the board yet. It carries the $BOARD_PENDING_LABEL label. $URL"
+  # Never "not on the board": a board can auto-add sub-issues at its bottom,
+  # and an adopted issue may already be placed. The run says only what it
+  # knows -- it did not look (#14 R14).
+  echo "#$NUM is $DONE_VERB and every relationship read back matching, but the board was not checked from the cloud. It may already be on it, at a spot nobody chose (sub-issues can be added to the bottom automatically). It carries the $BOARD_PENDING_LABEL label. $URL"
   # Loud, and still exit 0, like the NOT SET notice below: everything a cloud
   # session can write landed and read back. Placing it needs the board, so
   # the command is for a local session; its position is the one answer left.
   echo "########################################################################" >&2
-  echo "## NOT ON THE BOARD YET                                                #" >&2
+  echo "## BOARD NOT CHECKED                                                   #" >&2
   echo "########################################################################" >&2
-  echo "Cloud mode does not read or write the board, so #$NUM has no board" >&2
-  echo "position. It carries the $BOARD_PENDING_LABEL label so it can be found. Place it" >&2
-  echo "from a local session, choosing --after <N> or --top there; the adopt run" >&2
-  echo "writes only what is missing, reads everything back, and removes the label:" >&2
+  echo "Cloud mode does not read or write the board, so nothing has checked" >&2
+  echo "where #$NUM sits on it, or whether it is there at all. It carries the" >&2
+  echo "$BOARD_PENDING_LABEL label so it can be found. Place it from a local session," >&2
+  echo "choosing --after <N> or --top there; the adopt run writes only what is" >&2
+  echo "missing, reads everything back, and removes the label:" >&2
   reverify_command "(--after N | --top)" >&2
   echo "########################################################################" >&2
 elif [ "$POSITION_DEGRADED" -eq 0 ]; then
