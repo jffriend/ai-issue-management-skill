@@ -42,10 +42,6 @@ import json
 import re
 import sys
 
-# ---------------------------------------------------------------------------
-# The Design: field
-# ---------------------------------------------------------------------------
-
 # Matches `**Design:** ...`, `Design: ...`, `## Design`, `- **Design:** ...`.
 _DESIGN_LINE = re.compile(
     r"^\s*(?:[-*+]\s*)?(?:\#{1,6}\s*)?\*{0,2}\s*Design\s*\*{0,2}\s*:?\s*\*{0,2}\s*(.*)$",
@@ -90,9 +86,6 @@ def is_plan_derived(body, plan_dir):
     return bool(line) and plan_dir in line
 
 
-# ---------------------------------------------------------------------------
-# Title similarity
-# ---------------------------------------------------------------------------
 
 STOPWORDS = {
     "the", "and", "for", "into", "onto", "with", "from", "that", "this", "then",
@@ -168,12 +161,8 @@ def possible_duplicates(new_title, candidates, min_shared=2):
     return hits
 
 
-# ---------------------------------------------------------------------------
-# Prose that states an order between two pieces of work
-# ---------------------------------------------------------------------------
 
-# Cues strong enough to stand on their own: they only ever describe one thing
-# gating another.
+# Cues strong enough to stand alone: they only ever describe one thing gating another.
 _STRONG_CUES = re.compile(
     r"\b(?:"
     r"gate[sd]?\s+on"
@@ -189,15 +178,11 @@ _STRONG_CUES = re.compile(
     re.IGNORECASE,
 )
 
-# Cues that only mean an inter-issue order when what follows them names a
-# specific other piece of work. "before 1975" and "before any snapshot-taking
-# run" both use the same word and neither is an order between two issues.
+# Cues that mean an inter-issue order only when a specific piece of work follows ("before 1975" is not one).
 _WEAK_CUES = re.compile(r"\b(?:before|after|until|once|then)\b", re.IGNORECASE)
 
-# What follows a weak cue, up to the end of the clause.
 _CLAUSE_END = re.compile(r"[,;:.!?—]|\Z")
 
-# A definite reference: a specific, already-named piece of work.
 _DEFINITE = re.compile(
     r"^\s*(?:"
     r"the\b|that\b|this\b|those\b|these\b|its\b"
@@ -208,8 +193,6 @@ _DEFINITE = re.compile(
     r")",
 )
 
-# An indefinite or non-referential object: a step inside this task, a count, a
-# year, or an instruction addressed to the operator.
 _INDEFINITE = re.compile(
     r"^\s*(?:"
     r"a\b|an\b|any\b|each\b|every\b|another\b|some\b|no\b"
@@ -220,9 +203,7 @@ _INDEFINITE = re.compile(
     re.IGNORECASE,
 )
 
-# The object has to name work, not just any definite noun. Without this,
-# "it stops before the block that holds `ContentIdentifier`" reads as an order
-# between two issues, and it is a byte range inside a file.
+# The object must name work, or "stops before the block that holds `ContentIdentifier`" reads as an order.
 _WORK_REF = re.compile(
     r"\b(?:"
     r"upload(?:s|ed|ing)?|backup|back\s?ups?"
@@ -241,9 +222,7 @@ _WORK_REF = re.compile(
     re.IGNORECASE,
 )
 
-# Template boilerplate. `your-run.md` carries "Dry run first" and "Before you
-# start" on every issue of that shape; flagging those flags the template.
-# "before and after X" is a comparison, not an order.
+# Template boilerplate ("Dry run first", "Before you start") and "before and after X" comparisons are not orderings.
 _BOILERPLATE = re.compile(
     r"\b(?:dry\s+run\s+first|before\s+you\s+start|after\s+you\s+finish"
     r"|before\s+you\s+run|read\s+this\s+before"
@@ -288,8 +267,7 @@ def states_prose_ordering(body):
         matched = False
         for m in _WEAK_CUES.finditer(sentence):
             if m.group(0).lower() == "then":
-                # "then" is only a cue as the object of another cue
-                # ("until then"), which the object test below already sees.
+                # "then" counts only as the object of another cue ("until then"), which the object test below handles.
                 continue
             rest = sentence[m.end():]
             end = _CLAUSE_END.search(rest).start()
@@ -304,9 +282,6 @@ def states_prose_ordering(body):
     return hits
 
 
-# ---------------------------------------------------------------------------
-# CLI for the bash caller
-# ---------------------------------------------------------------------------
 
 
 def _extract_config_flag(args):
