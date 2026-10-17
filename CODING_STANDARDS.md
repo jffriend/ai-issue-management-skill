@@ -14,3 +14,4 @@
 - The engine carries no project-specific vocabulary. Repo, owner, project number, issue shapes, labels, and provenance conventions come from the consuming repo's `config.json`.
 - Use only `bash`, `jq`, `python3`, and `gh`. Don't add other tools or dependencies.
 - Before changing the read-back or delta-write logic, read the entries in `docs/solutions/`. They document real bugs in that code.
+- The placement refusals, duplicate check, dry-run, and read-back verification are the product. Each exists because the case it guards really happened. Never remove or weaken them as unneeded error handling.
