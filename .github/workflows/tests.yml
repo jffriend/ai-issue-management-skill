@@ -22,3 +22,14 @@ jobs:
         with:
           python-version: "3.12"
       - run: python3 -m unittest discover tests
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 -m pip install ruff==0.17.1 shellcheck-py==0.11.0.1
+      - run: shellcheck file_issue.sh board.sh
+      - run: ruff check --select F,E9,B issue_text.py tests
