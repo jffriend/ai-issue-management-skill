@@ -1,30 +1,29 @@
 #!/usr/bin/env python3
 """
-issue_text.py  --  the pure text logic behind the issue-filing gate and the
-board audit.
+issue_text.py  --  the pure text logic behind the issue-filing gate.
 
 WHY THIS EXISTS
 ---------------
-Three questions about an issue can be answered from its text alone, and all
-three were previously answered by a human remembering to:
+Three questions about an issue can be answered from its text alone, so a tool
+answers them rather than a human remembering to:
 
   1. Is this issue plan-derived?  `is_plan_derived` reads the `Design:` field.
-     If it links into `docs/plans/`, a parent is REQUIRED and `--no-parent` is
-     refused by `scripts/file_issue.sh`. That is the repo owner's rule, applied
-     mechanically so it does not depend on anyone noticing.
+     If it links into the configured `plan_dir`, a parent is REQUIRED and
+     `--no-parent` is refused by `file_issue.sh`. That is the repo owner's
+     rule, applied mechanically so it does not depend on anyone noticing.
 
   2. Does a title look like one already on the board?  `possible_duplicates`.
-     A truncated board listing hid #164 on 2026-08-19 and a session filed #176
-     as a duplicate of it. The filing tool now prints near-duplicates and makes
-     a human say yes.
+     A board listing can be long or truncated enough to hide an existing
+     issue, so the filing tool prints near-duplicates before it creates
+     anything.
 
   3. Does this body state an order between two pieces of work?
-     `states_prose_ordering`. `docs/WORKFLOW.md` requires such an order to be
-     recorded as a `dependencies/blocked_by` link in the same change; the
-     2026-08-19 ordering audit found 16 that were not.
+     `states_prose_ordering`. Such an order belongs in a `blocked_by` or
+     `blocking` link, and prose alone records neither. No engine path calls
+     this; it is library logic for a consumer's own board audit.
 
 This module reads text. It calls nothing, writes nothing, and knows nothing
-about GitHub. `scripts/file_issue.sh` shells out to the CLI at the bottom.
+about GitHub. `file_issue.sh` shells out to the CLI at the bottom.
 
 CLI (for the bash caller)
     python3 issue_text.py plan-derived --config <config.json> <body-file>
@@ -79,8 +78,8 @@ def is_plan_derived(body, plan_dir):
     Only the field counts. A mention of `plan_dir` in the prose is not a
     design link, and a link to a narrative document elsewhere in the repo is
     not a plan unit. `plan_dir` is the consuming repo's own config value
-    (KTD3) -- this function no longer reads a hardcoded constant, so a caller
-    that forgets to supply it gets a TypeError, not a silently-wrong default.
+    (KTD3) and has no default, so a caller that forgets to supply it gets a
+    TypeError rather than a silently-wrong answer.
     """
     line = design_field(body)
     return bool(line) and plan_dir in line
@@ -245,17 +244,14 @@ def states_prose_ordering(body):
     """
     Sentences that state an order between this work and other work.
 
-    Returns the matched sentences, not a boolean, so the audit can print the
-    evidence and a reader can disagree with it.
+    Returns the matched sentences, not a boolean, so a caller's audit can
+    print the evidence and a reader can disagree with it.
 
-    The naive version of this reported 34 of 66 open issues. Two things it got
-    wrong are handled here: a weak cue only counts when what follows it names a
-    specific other piece of work (so "years before 1975" and "before any
-    snapshot-taking run" do not count), and the issue templates' own
-    boilerplate is excluded. The third thing it got wrong -- checking only
-    `blocked_by`, when "do this before the upload" is correctly recorded as
-    BLOCKING the upload -- belongs to the caller, and `board_audit.py` checks
-    both directions.
+    A weak cue only counts when what follows it names a specific other piece
+    of work, so "years before 1975" and "before any snapshot-taking run" do
+    not count. The issue templates' own boilerplate is excluded. Direction is
+    the caller's job: "do this before the upload" is correctly recorded as
+    BLOCKING the upload, so an audit must check `blocked_by` and `blocking`.
     """
     hits = []
     for sentence in _sentences(body):

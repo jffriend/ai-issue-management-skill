@@ -1,20 +1,10 @@
 #!/usr/bin/env python3
 """
-Ported from Photos' tests/test_file_issue_skill.py. That file is a conformance
-and drift scan for `.claude/skills/file-issue/SKILL.md` -- Photos' own skill
-wrapper around `scripts/file_issue.sh`. This repo has no SKILL.md and no
-skill-wrapper concept, so every class and helper that reads or checks the
-skill document, its frontmatter, or Photos' own CLAUDE.md/docs/WORKFLOW.md was
-left behind (`SkillDrivesTheScript`, `NoReimplementation`,
-`FrontmatterKeepsTheSkillReachable`, `DocumentationNamesTheFrontDoor`, and the
-skill-file-specific test in `FailClosed`). What's ported is only the coverage
-of the script's own flag parsing and its fail-closed behavior when that
-parsing can't find what it expects: `FlagsMatchTheScript` (trimmed to the
-sub-tests that check the script alone, not a skill document naming its
-flags) and the parser-block-gutting tests from `FailClosed`.
+Drift scans over `file_issue.sh`'s own flag parsing, plus a fill check for
+SKILL.template.md.
 
-WHY THIS EXISTS (from the original file, as it applies to what remains)
-------------------------------------------------------------------------
+WHY THIS EXISTS
+---------------
 Does any flag this scan expects still exist in the script? The `--flag)` arms
 are parsed out of the script itself via `parser_flags()`. Can the parser scan
 actually fail rather than silently reporting no flags? `FailClosed`'s
@@ -103,12 +93,7 @@ def parser_flags(path=FILE_ISSUE, text=None):
 
 
 class FlagsMatchTheScript(unittest.TestCase):
-    """Can the script's own flag set still be parsed out of its text?
-
-    Trimmed from Photos' version, which also compared the parsed set against
-    every flag `.claude/skills/file-issue/SKILL.md` names -- this repo has no
-    such document, so only the sub-tests that check the script alone survive.
-    """
+    """Can the script's own flag set still be parsed out of its text?"""
 
     def test_the_parser_arms_are_findable_and_include_the_known_flags(self):
         flags = parser_flags()
@@ -121,11 +106,8 @@ class FlagsMatchTheScript(unittest.TestCase):
     def test_the_gh_remedy_flags_are_only_allowed_because_the_script_prints_them(self):
         """Printed as a remedy, not merely spelled somewhere in the file.
 
-        The old `--remove-*` flags also appeared in the old capability probe's
-        required-flag string, so asserting mere presence stayed green even with
-        every remedy print site deleted -- the test was named for a thing it
-        did not check. The REST paths appear in comments and in the writes
-        too, so the same holds for them.
+        The REST paths also appear in comments and in the writes, so a
+        presence check would stay green with every remedy print site deleted.
         """
         script_text = read_or_raise(FILE_ISSUE, "remedy-flag check")
         for flag in GH_REMEDY_FLAGS:
@@ -136,13 +118,12 @@ class FlagsMatchTheScript(unittest.TestCase):
                 % (flag, REMEDY_CONSTRUCTION))
 
     def test_mere_presence_in_the_script_does_not_make_a_flag_a_remedy(self):
-        """The claim the old comment made and the code did not keep.
+        """Appearing somewhere in the file, comments included, is not enough.
 
-        The old test was `flag in script_text` -- membership in the whole file,
-        comments included. `-X POST`, `/sub_issues` and `-F issue_id=` all appear
-        somewhere in the script without being parser arms or remedies, which is
-        exactly the set a hand-rolled reimplementation needs. Being printed on a
-        runnable remedy line is the property that matters.
+        `-X POST`, `/sub_issues` and `-F issue_id=` all appear in the script
+        without being parser arms or remedies, which is exactly the set a
+        hand-rolled reimplementation needs. Being printed on a runnable remedy
+        line is the property that matters.
         """
         script_text = read_or_raise(FILE_ISSUE, "remedy-flag check")
         for flag in ("-X POST", "/sub_issues", "-F issue_id="):
@@ -157,10 +138,8 @@ class FlagsMatchTheScript(unittest.TestCase):
 class FailClosed(unittest.TestCase):
     """A scan that cannot look must raise, never pass.
 
-    Trimmed from Photos' version to the parser-block-gutting tests -- an
-    unrecognisable parser used to be indistinguishable from a clean result.
-    That is a failure here. (Photos' sibling test for an unreadable SKILL.md
-    is left behind along with the rest of the skill-document coverage.)
+    An unrecognisable parser would otherwise be indistinguishable from a
+    clean result.
     """
 
     def test_an_unreadable_script_raises_in_the_flag_scan(self):
@@ -172,8 +151,8 @@ class FailClosed(unittest.TestCase):
 
         `parser_flags` takes a PATH and opens it itself, so these two tests need
         a real file -- unlike a scanner that could be handed a mutated string
-        directly. The directory is torn down afterwards: `mkdtemp` left one
-        behind per test, every run, forever.
+        directly. The directory is torn down afterwards so no run leaves one
+        behind.
         """
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)

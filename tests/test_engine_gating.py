@@ -1,28 +1,21 @@
 #!/usr/bin/env python3
 """
-Ported from Photos' tests/test_file_issue_gating.py, unchanged except for the
-FILE_ISSUE path constant (no scripts/ subdirectory here) and one excluded test
-method (see AbsentRefusalWording below) that checked Photos' own
-docs/WORKFLOW.md, which does not exist in this repo.
-
 Tests for file_issue.sh -- the gate that refuses to create an issue with
 an unanswered placement question.
 
 WHY THIS EXISTS
 ---------------
-`docs/WORKFLOW.md` says an ordering constraint must be recorded as a blocker in
-the same change that writes the issue. On 2026-08-19 that rule was broken three
-times in one day, by sessions that had read it in the same sitting. A prompt does
-not work. So the four placement questions -- parent, board position, what blocks
-this, what this blocks -- are now flags, each of them REQUIRED, each with an
-explicit way to say "none". A missing answer is an error that names the flag. It
-is never a silent default, because a silent default is exactly what produced the
-16 unrecorded constraints the 2026-08-19 ordering audit found.
+A written rule to record ordering constraints does not hold on its own
+(docs/CONCEPTS.md has the origin). So the four placement questions -- parent,
+board position, what blocks this, what this blocks -- are flags, each of them
+REQUIRED, each with an explicit way to say "none". A missing answer is an error
+that names the flag, never a silent default, because a silent default is how a
+constraint goes unrecorded.
 
-Separately, a truncated board listing hid #164 well enough that a session filed
-#176 as a duplicate. So the tool prints the board neighbourhood and any
-near-duplicate titles and makes a human say yes before it creates anything, and
-it treats a truncated board as fatal rather than as a short board.
+A truncated board listing can hide an existing issue and invite a duplicate.
+So the tool prints the board neighbourhood and any near-duplicate titles before
+it creates anything, and it treats a truncated board as fatal rather than as a
+short board.
 
 HOW THESE TESTS AVOID THE REAL BOARD
 ------------------------------------
@@ -194,8 +187,8 @@ def issue_id(n):
 def issue_reply(n, state="open", body="", parent=None, labels=()):
     """`GET repos/{repo}/issues/{n}` as GitHub returns it.
 
-    `parent_issue_url` is ABSENT on a parentless issue, not null -- measured
-    2026-10-15 -- so it is added only when there is a parent. `labels` is
+    `parent_issue_url` is ABSENT on a parentless issue, not null, so it is
+    added only when there is a parent. `labels` is
     always present, as an array of label objects, empty when there are none.
     """
     d = {"id": issue_id(n), "number": int(n), "state": state, "body": body,
@@ -334,9 +327,7 @@ class Harness:
 
         Each logged line is a JSON list, so an argument carrying an embedded
         newline comes back whole instead of being cut at that newline and its
-        tail read as further calls. The shape returned is unchanged -- a list
-        of argv lists -- so `called()`, `network_calls()`, `wrote_nothing()`
-        and `comment_body()` all read it exactly as before.
+        tail read as further calls.
         """
         return [
             json.loads(line)
@@ -962,10 +953,9 @@ def path_without_gh():
 
 class CapabilityProbe(unittest.TestCase):
     """
-    #14 KTD7: every GitHub call now goes through `gh api`, so the probe no
-    longer reads `gh issue create/edit --help` or `gh issue view --json` for
-    flags and fields the engine does not use. It refuses only when `gh` is not
-    on PATH, and prints the installed version for the record.
+    #14 KTD7: every GitHub call goes through `gh api`, so the probe checks no
+    `gh issue` flags or fields. It refuses only when `gh` is not on PATH, and
+    prints the installed version for the record.
     """
 
     ARGS_TAIL = ("--no-parent", "--top", "--dry-run")
@@ -1504,9 +1494,9 @@ class AdoptContradiction(unittest.TestCase):
 
 class AdoptDelta(unittest.TestCase):
     """
-    `gh issue edit` is NOT idempotent -- measured against the live board on
-    2026-08-24 with gh 2.98.0 and recorded on #233. Re-adding a link that is
-    already there fails the WHOLE call:
+    `gh issue edit` is NOT idempotent: re-adding a link that is already there
+    fails the WHOLE call (docs/solutions/developer-experience/
+    gh-issue-edit-is-not-idempotent-write-a-delta-not-a-set.md):
 
         gh issue edit 234 --add-blocked-by 233
           Validation failed: Target issue has already been taken (addBlockedBy)
@@ -1537,9 +1527,8 @@ class AdoptDelta(unittest.TestCase):
     def test_an_already_present_blocking_link_is_omitted_and_the_others_are_sent(self):
         """The `blocks` mirror of the blocked-by test above.
 
-        Photos' original suite only carried this shape for parent and
-        blocked-by; blocking is the third relationship kind the delta is
-        computed for and needs its own proof.
+        Blocking is the third relationship kind the delta is computed for and
+        needs its own proof.
         """
         h = adopt_harness(pre_blocking=[63], post_blocking=[63, 70])
         r = h.run(*adopt_args(**{"--blocks": "63,70"}), "--no-parent",
@@ -1599,9 +1588,9 @@ class AdoptDelta(unittest.TestCase):
 
 class AdoptResolvesBeforeWriting(unittest.TestCase):
     """KTD3 holds in adopt too: every number adopt is about to link is
-    resolved before the first write. A typo in --parent or --blocks used to
-    surface only as a 404 on its own POST, after the other links had landed,
-    leaving the issue partly wired."""
+    resolved before the first write, so a typo in --parent or --blocks is
+    refused before any link lands instead of leaving the issue partly
+    wired."""
 
     MISSING = [{"match": "issues/999", "exit": 1,
                 "stderr": "gh: Not Found (HTTP 404)\n"}]
@@ -1912,16 +1901,13 @@ class OneImplementation(unittest.TestCase):
             [], current_shell_call_problems(FILE_ISSUE.read_text()))
 
     def test_the_current_shell_guard_catches_a_piped_call_site(self):
-        """A pipeline is a subshell too, and the old check could not see one.
+        """A pipeline is a subshell too, and the guard must see one.
 
-        The check used to forbid `$(`, a backtick and `${`, and otherwise only
-        require the line to START with the call. `read_back | cat`,
-        `read_back &` and `read_back || true` all satisfied that, and every one
+        A line that only STARTS with the call is not enough: `read_back | cat`,
+        `read_back &` and `read_back || true` all start that way, and every one
         of them puts half_wired's `exit 1` in a subshell that `set -uo
-        pipefail` without `-e` swallows. Appending `| cat` kept every guard
-        assertion in this suite green while the mutated script exited 0 on a
-        blocked-by mismatch that was really there. With no CI, this test is the
-        only thing standing between that edit and the board.
+        pipefail` without `-e` swallows. The script then exits 0 on a real
+        mismatch while every other guard assertion in this suite stays green.
         """
         text = FILE_ISSUE.read_text()
         for suffix in (" | cat", " &", " || true"):
@@ -2145,8 +2131,8 @@ class WriteShapeParity(unittest.TestCase):
 
 class Usage(unittest.TestCase):
     """
-    R15: `usage()` used to copy a FIXED LINE RANGE that already ran past the
-    header, so `--help` printed shell code verbatim. It is delimited now.
+    R15: `--help` prints the delimited usage header and never the shell code
+    after it.
     """
 
     def test_help_prints_both_modes_and_no_shell_code(self):
@@ -2305,19 +2291,15 @@ class ReadBackRetry(unittest.TestCase):
         self.assertIn("bound is nearly exhausted", r.stderr)
 
     def test_the_warning_names_a_delay_the_ceiling_will_actually_accept(self):
-        """#265: the old text said "raise ATTEMPTS / DELAY", but ATTEMPTS=6 at
-        DELAY=1 is refused (31s over the 30s ceiling) -- a knob the very next
-        run of this script would reject. The warning must name a DELAY value
-        instead, and that value must itself pass the ceiling check at the
-        same ATTEMPTS.
+        """The warning names a DELAY value, and that value must itself pass
+        the ceiling check at the same ATTEMPTS. "Raise ATTEMPTS" is not safe
+        advice: ATTEMPTS=6 at DELAY=1 is refused (31s over the 30s ceiling).
 
         The round-trip run below only needs to clear the STARTUP ceiling
         validation, which happens before any board read -- it does not need
         to actually retry. A board that converges on the first attempt
         proves the same thing without sleeping for the suggested value in
-        real time (a prior version of this test fed ATTEMPTS=2's suggestion,
-        the entire 30s ceiling, into a run that also converged on the FINAL
-        attempt, so it really slept 30 seconds).
+        real time.
         """
         h, r = self._run([PRE_BOARD, BOARD_WITHOUT_200, BOARD_WITH_200],
                          env={"FILE_ISSUE_READBACK_ATTEMPTS": 2})
@@ -2356,10 +2338,9 @@ class ReadBackRetry(unittest.TestCase):
         guards against. tests in this file rely on DELAY=0 for speed.
 
         The read-back must actually reach the final attempt here, not just
-        pass the startup ceiling check -- a prior version of this test
-        converged on the FIRST attempt, so the warning block this exact
-        configuration triggers (ATTEMPTS=20 has no ceiling headroom left for
-        any DELAY) never ran, and a broken suggestion there went undetected.
+        pass the startup ceiling check: only then does the warning block this
+        exact configuration triggers (ATTEMPTS=20 has no ceiling headroom left
+        for any DELAY) run, so a broken suggestion there is caught.
         DELAY stays 0 throughout, so the extra attempts cost no real time.
         """
         boards = [PRE_BOARD] + [BOARD_WITHOUT_200] * 19 + [BOARD_WITH_200]
@@ -2469,7 +2450,7 @@ def position_line(stdout):
 
 
 class ReadBackProvesSomething(unittest.TestCase):
-    """F1: the relationship read-back passed on ANY non-empty JSON.
+    """The relationship read-back never passes on merely non-empty JSON.
 
     Over REST (#14 KTD6) it reads three replies, and each one's SHAPE is
     checked, because empty is a legal answer for all three: an issue with no
@@ -2506,12 +2487,12 @@ class ReadBackProvesSomething(unittest.TestCase):
         self.assertNotIn("delete", out.replace("Do not delete", ""))
 
     def test_an_issue_reply_without_number_and_state_is_not_a_pass(self):
-        """`{"message":"Not Found"}` used to read back as three clean `ok`s.
+        """`{"message":"Not Found"}` must not read back as three clean `ok`s.
 
         Every jq extraction on it yields empty, and empty compares EQUAL to the
-        empty answer set -- so on the commonest filing shape the run printed
-        `parent ok (none)`, `blocked-by ok (none)`, `blocks ok (none)` and
-        exited 0 having proven nothing at all.
+        empty answer set -- so on the commonest filing shape an emptiness check
+        alone would print `parent ok (none)`, `blocked-by ok (none)`, `blocks
+        ok (none)` and exit 0 having proven nothing at all.
         """
         r, out = self._run(READ_ISSUE_MATCH,
                            stdout=json.dumps({"message": "Not Found"}))
@@ -2557,8 +2538,8 @@ class ReadBackProvesSomething(unittest.TestCase):
 
 
 class NumbersAreValidatedOffline(unittest.TestCase):
-    """F2, F3: a typo in --parent or --after used to create a REAL issue and
-    then declare it half-wired, with "delete #N and re-run" as the remedy."""
+    """A typo in --parent or --after is refused offline, before a REAL issue
+    is created that would then be half-wired."""
 
     def test_a_malformed_parent_is_refused_offline(self):
         h = Harness("**Design:** none\n")
@@ -2571,12 +2552,13 @@ class NumbersAreValidatedOffline(unittest.TestCase):
                          "the refusal must land before anything is created")
 
     def test_a_regex_after_is_refused_offline(self):
-        """`--after 1.4` used to MATCH #144 on the board.
+        """`--after 1.4` must not MATCH #144 on the board.
 
-        `grep -qx` reads its argument as a basic regular expression, so the
-        "is it on the board" gate passed, the issue was created, and the
-        GraphQL lookup -- which takes an Int! -- then failed and ended the run
-        HALF-WIRED with the delete remedy.
+        `grep -qx` reads its argument as a basic regular expression, so
+        without the offline digit check the "is it on the board" gate would
+        pass, the issue would be created, and the GraphQL lookup -- which
+        takes an Int! -- would then fail and end the run HALF-WIRED with the
+        delete remedy.
         """
         board = [(101, "First"), (144, "Second"), (107, "Third")]
         h = Harness("**Design:** none\n", boards=[board])
@@ -2600,17 +2582,17 @@ class NumbersAreValidatedOffline(unittest.TestCase):
 
 
 class PositionProofIsLatched(unittest.TestCase):
-    """F4: a position PROVEN WRONG was re-reported as position UNVERIFIED."""
+    """A position PROVEN WRONG is never re-reported as position UNVERIFIED."""
 
     def test_proven_wrong_then_a_silent_listing_still_says_wrong(self):
         """Boards: pre, WRONG POSITION, then absent -- with the corroborating
         read positive throughout.
 
-        The refusal used to be chosen from the LAST attempt's `in_listing`
-        alone. The early attempt that saw the wrong position was thrown away,
-        and the operator was told "the board listing never showed it" and
-        "Nothing here proved the position wrong" -- both false. A did-not-land
-        was routed into the probably-fine bucket.
+        The refusal is not chosen from the LAST attempt's `in_listing` alone:
+        that would throw away the early attempt that saw the wrong position,
+        tell the operator "the board listing never showed it" and "Nothing
+        here proved the position wrong" -- both false -- and route a
+        did-not-land into the probably-fine bucket.
         """
         h = Harness(
             "**Design:** none\n",
@@ -2640,7 +2622,7 @@ class PositionProofIsLatched(unittest.TestCase):
 
 
 class DuplicateNumbersInAnAnswer(unittest.TestCase):
-    """F5: `--blocked-by 122,122` failed a CORRECTLY WIRED issue."""
+    """`--blocked-by 122,122` must not fail a CORRECTLY WIRED issue."""
 
     BOARD_AFTER = [
         (101, "First thing on the board"),
@@ -2650,8 +2632,8 @@ class DuplicateNumbersInAnAnswer(unittest.TestCase):
 
     def test_a_repeated_blocker_reads_back_as_correctly_wired_on_create(self):
         """The server cannot hold the same link twice, so it reads back once.
-        The WANTED set used to keep the repeat, so the comparison failed and
-        the create-mode refusal told the operator to delete the issue."""
+        The WANTED set drops the repeat too, or the comparison would fail and
+        the create-mode refusal would tell the operator to delete the issue."""
         h = Harness(
             "**Design:** none\n",
             boards=[PRE_BOARD, self.BOARD_AFTER],
@@ -2704,12 +2686,12 @@ def board_page_without_node_id(rows, n):
 
 
 class ErroredLookupIsNotAnAbsentItem(unittest.TestCase):
-    """F8: a FAILED `--after` lookup was reported as proven-wrong.
+    """A FAILED `--after` lookup is a could-not-look, never proven-wrong.
 
-    The `--after` item's node id now comes from the pre-write board listing
-    (#14 KTD5), which the gate already proved names #AFTER. So the item can no
-    longer be ABSENT once a write has happened; it can still be UNREADABLE --
-    a row with no node id -- and that must stay a could-not-look.
+    The `--after` item's node id comes from the pre-write board listing
+    (#14 KTD5), which the gate already proved names #AFTER. So the item cannot
+    be ABSENT once a write has happened; it can still be UNREADABLE -- a row
+    with no node id -- and that must stay a could-not-look.
     """
 
     BOARD_AFTER = [
@@ -2719,10 +2701,9 @@ class ErroredLookupIsNotAnAbsentItem(unittest.TestCase):
     ]
 
     def test_an_after_item_with_no_node_id_says_the_READ_failed(self):
-        """`2>/dev/null` once made an errored query look exactly like an
-        absent item, and the call site routed that to half_wired() -- the
-        did-not-land refusal, the one that prints "delete #N and re-run" --
-        over a READ that failed."""
+        """An errored query must not look like an absent item, or the call
+        site routes it to half_wired() -- the did-not-land refusal, the one
+        that prints "delete #N and re-run" -- over a READ that failed."""
         h = Harness(
             "**Design:** none\n",
             boards=[PRE_BOARD, self.BOARD_AFTER],
@@ -2747,7 +2728,7 @@ POSITION_403 = {"exit": 1, "stdout": "",
 class BoardHalfOverRest(unittest.TestCase):
     """#14 U5: item-add is a REST POST carrying the issue's numeric id, and the
     position write -- the one GraphQL call left -- is classified by its error
-    (KTD2): HTTP 403 degrades, anything else is half-wired as before."""
+    (KTD2): HTTP 403 degrades, anything else is half-wired."""
 
     BOARD_AFTER = [
         (101, "First thing on the board"),
@@ -2899,8 +2880,8 @@ class DegradedPosition(unittest.TestCase):
 
 
 class RetryCeilingIsEnforced(unittest.TestCase):
-    """F9: only the FORMAT of the two variables was validated, not the wait
-    they imply."""
+    """The two retry variables are validated for the wait they imply, not
+    only their FORMAT."""
 
     def test_a_bound_over_the_thirty_second_ceiling_is_refused(self):
         h = Harness("**Design:** none\n")
@@ -2931,7 +2912,7 @@ class RetryCeilingIsEnforced(unittest.TestCase):
 
 
 class AbsentRefusalWording(unittest.TestCase):
-    """F11a: "Add it by hand" asserted a write that had in fact succeeded."""
+    """The refusal never says "Add it by hand" about a write that succeeded."""
 
     def test_the_absent_refusal_does_not_claim_nothing_was_written(self):
         h = Harness("**Design:** none\n",
@@ -2950,13 +2931,13 @@ class AbsentRefusalWording(unittest.TestCase):
 
 
 class AdoptDisclosesTheMove(unittest.TestCase):
-    """F12: adopt silently MOVED a boarded issue, showing only the
-    destination.
+    """Adopt never silently MOVES a boarded issue: it shows where the issue
+    is now, not only the destination.
 
     Adopt refuses rather than reconciles for parent, blocked-by and blocks. It
     cannot for position -- all four placement answers are mandatory, so a
     position is always named and refusing would make adopt unusable for
-    re-prioritising. So the fix is disclosure, not refusal.
+    re-prioritising. So the guard is disclosure, not refusal.
     """
 
     def test_the_summary_names_the_current_slot_and_says_it_moves(self):
@@ -3014,12 +2995,11 @@ def comment_body(call):
 
 
 class AdoptRecordsTheMove(unittest.TestCase):
-    """F13: disclosure BEFORE the move was only half of it.
+    """Disclosure BEFORE the move is only half of it; the move is recorded too.
 
-    The screen said "this MOVES it", the operator said yes, and the slot the
-    issue came from was then recorded nowhere -- a real prior priority
-    decision, unrecoverable the moment it was overwritten. So an adopt that
-    moves an issue now comments on it naming both slots, and one that does not
+    Without a record, the slot the issue came from -- a real prior priority
+    decision -- is unrecoverable the moment it is overwritten. So an adopt that
+    moves an issue comments on it naming both slots, and one that does not
     move it writes nothing.
 
     The judgement is NOT recomputed here: the script latches it in the same
@@ -3163,10 +3143,9 @@ class AdoptRecordsTheMove(unittest.TestCase):
 
 
 class FakeGhRuleOrder(unittest.TestCase):
-    """F14: the fake matches argv SUBSTRINGS, so a specific rule only answers
-    when it comes before every more general rule it overlaps. Nothing used to
-    assert that, and a reorder made `test_missing_from_the_board_fails_loudly`
-    unable to fail."""
+    """The fake matches argv SUBSTRINGS, so a specific rule only answers when
+    it comes before every more general rule it overlaps. A wrong order can
+    leave a test unable to fail."""
 
     @staticmethod
     def _index(rules, match):
@@ -3314,7 +3293,7 @@ class PluckdConfig(unittest.TestCase):
     """AE2: a Pluckd-shaped config (shapes work/bug/decision/plan-parent, no
     your-run, project board #1, no Design-line requirement) drives the same
     four placement questions, applies the vocabulary IT names, and writes to
-    ITS repo -- not Photos'."""
+    ITS repo -- not the Photos-shaped config's."""
 
     def test_filing_a_bug_shaped_issue_uses_pluckds_repo_and_label(self):
         # The second page must already carry #200, or a correctly wired filing fails its own read-back.
@@ -3365,10 +3344,9 @@ class PluckdConfig(unittest.TestCase):
 
 class BoardShIntegration(unittest.TestCase):
     """R2/KTD3: board.sh reads the same --config file file_issue.sh reads,
-    and its self-check line ('pages=N rows=N distinct=N') is unchanged --
-    still written to stderr, still in that shape -- once the underlying
-    board read is config-driven instead of hardcoding the login and
-    project number."""
+    and its self-check line ('pages=N rows=N distinct=N') is written to
+    stderr in that shape, with the login and project number taken from the
+    config."""
 
     def _env(self, h):
         env = dict(os.environ)
@@ -3417,8 +3395,8 @@ class BoardShIntegration(unittest.TestCase):
 class BoardOverRest(unittest.TestCase):
     """#14 U1: board.sh reads the board through the REST items endpoint,
     following the `Link` header's `after` cursor itself, so the page count,
-    the 20-page cap and the rows-versus-distinct self-check all survive the
-    move off GraphQL."""
+    the 20-page cap and the rows-versus-distinct self-check all hold over
+    REST."""
 
     PAGE1 = [(101, "First thing on the board"), (102, "Second thing"),
              (103, "Third thing")]

@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """
 Tests for issue_text.py -- the pure text logic behind the issue-filing
-gate and the board audit.
+gate.
 
 WHY THIS EXISTS
 ---------------
-`docs/WORKFLOW.md` already tells a session to record an ordering constraint as a
-blocker when the issue is written. That instruction was violated three times in
-one day by sessions that had read it in the same sitting, so the rule now lives
-in a tool that refuses rather than in prose that asks. And a truncated board
-listing hid #164 well enough that a later session filed #176 as a duplicate of
-it, so the filing tool also looks for near-duplicate titles before it creates
-anything.
+A written rule asking a session to record an ordering constraint does not
+hold (docs/CONCEPTS.md has the history), so the rule lives in a tool that
+refuses rather than in prose that asks. A board listing can also hide an
+existing issue, so the filing tool looks for near-duplicate titles before it
+creates anything.
 
 Three pieces of logic carry that, and all three are pure text:
 
@@ -24,7 +22,7 @@ Three pieces of logic carry that, and all three are pure text:
      prose? These are the ones that need a dependency link in one direction or
      the other.
 
-Nothing here touches GitHub, and nothing here touches the photo library.
+Nothing here touches GitHub.
 
 Run:  python3 tests/test_engine_issue_text.py
 """
@@ -67,10 +65,9 @@ class DesignField(unittest.TestCase):
 class PlanDerived(unittest.TestCase):
     """The parenting rule's mechanical test.
 
-    `plan_dir` is passed explicitly on every call (KTD3) -- `is_plan_derived`
-    no longer reads a hardcoded `PLAN_DIR` module constant. `"docs/plans/"`
-    here is Photos' own value; `PluckdPlanDerived` below proves the same
-    function works correctly against a distinct `plan_dir`.
+    `plan_dir` is passed explicitly on every call (KTD3). `"docs/plans/"`
+    here is the Photos-shaped example config's value; `PluckdPlanDerived`
+    below proves the same function works against a distinct `plan_dir`.
     """
 
     PLAN_DIR = "docs/plans/"
@@ -154,7 +151,7 @@ class CodeTokens(unittest.TestCase):
 
 
 class Duplicates(unittest.TestCase):
-    """The check that would have caught #176 duplicating #164."""
+    """Near-duplicate titles are flagged before an issue is created."""
 
     CANDIDATES = [
         (164, "Run: re-sort the library into YYYY/MM once the dates are final"),
@@ -187,11 +184,10 @@ class ProseOrdering(unittest.TestCase):
     """
     The detector for "this issue states an order but records no dependency".
 
-    An earlier naive regex reported 34 of 66 because it matched "years before
-    1975" and because it only looked at `blocked_by` -- an issue that says "do
-    this before the upload" is correctly recorded as BLOCKING the upload, not as
-    blocked. The direction problem is handled by the audit; the false-positive
-    problem is handled here.
+    A bare cue such as "years before 1975" is not an ordering between pieces
+    of work, so it must not match. Direction is not checked here: "do this
+    before the upload" is correctly recorded as BLOCKING the upload, and the
+    caller's audit checks both directions.
     """
 
     def test_until_the_named_work_is_ordering(self):
