@@ -1083,7 +1083,7 @@ read_dependency_numbers() {
 read_back_board() {
   # Board half of read_back: not yet visible, did not land and could not look are refused apart; only reads retry (KD1).
   local attempt=1 delay="$READBACK_DELAY"
-  local in_listing=0 member_proven="$ADD_PROVED_MEMBER" position_ok=0 position_msg=""
+  local in_listing=0 member_proven=0 position_ok=0 position_msg=""
   # Proof is latched: once the server has shown a wrong position, later listing silence doesn't unsettle it.
   local position_proven_wrong=0
   READBACK_WAITED=0
@@ -1138,16 +1138,19 @@ read_back_board() {
   done
 
   if [ "$POSITION_DEGRADED" -eq 1 ]; then
-    # No position was written, so membership is the whole verdict.
-    [ "$member_proven" -eq 1 ] \
-      || half_wired_absent "#$NUM is not on the board (project $PROJECT_NUMBER) after being added to it"
+    # No position was written, so membership is the whole verdict; the 422 predates the read-back, so it only explains silence.
+    if [ "$member_proven" -eq 0 ]; then
+      [ "$ADD_PROVED_MEMBER" -eq 1 ] \
+        && half_wired_unverified "board membership of #$NUM could not be re-read — item-add said it is already on the board, but the board listing never showed it"
+      half_wired_absent "#$NUM is not on the board (project $PROJECT_NUMBER) after being added to it"
+    fi
   else
     # Read the latch only if no attempt saw the right position: proven wrong, then silent, is not UNVERIFIED.
     if [ "$position_ok" -eq 0 ] && [ "$position_proven_wrong" -eq 1 ]; then
       half_wired "$position_msg"
     fi
     if [ "$in_listing" -eq 0 ]; then
-      if [ "$member_proven" -eq 1 ]; then
+      if [ "$member_proven" -eq 1 ] || [ "$ADD_PROVED_MEMBER" -eq 1 ]; then
         half_wired_unverified "board position for #$NUM could not be verified — #$NUM is on the board, but the board listing never showed it"
       fi
       half_wired_absent "#$NUM is not on the board (project $PROJECT_NUMBER) after being added to it"

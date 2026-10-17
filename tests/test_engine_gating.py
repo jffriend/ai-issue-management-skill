@@ -1769,6 +1769,23 @@ class AdoptReadBack(unittest.TestCase):
         self.assertNotIn("PARTLY WIRED", r.stderr)
         self.assertNotIn("by hand", r.stderr)
 
+    def test_a_422_alone_never_passes_a_read_back_that_saw_nothing(self):
+        # A refused position write makes membership the whole verdict, and the 422 predates the read-back.
+        h = Harness("**Design:** none\n", boards=[self.OFF_BOARD],
+                    responses=[{"match": "projectItems", "stdout": json.dumps(
+                        {"data": {"repository": {"issue": {"projectItems": {"nodes": [
+                            {"id": "PVTI_from_issue", "databaseId": 900200,
+                             "project": {"id": PHOTOS_CONFIG["project_id"]}}]}}}}})}]
+                    + override(override(adopt_responses(), ITEM_ADD_MATCH, exit=1,
+                                        stderr="gh: Content already exists in this "
+                                               "project (HTTP 422)\n"),
+                               POSITION_MATCH, exit=1,
+                               stderr="gh: Resource not accessible (HTTP 403)\n"))
+        r = h.run(*adopt_args(), "--no-parent", "--top")
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        self.assertNotIn("board membership   ok", r.stdout)
+        self.assertNotIn("PARTLY WIRED", r.stderr)
+
     def test_an_add_failing_for_another_reason_is_not_read_as_membership(self):
         h, r = self._already_added([self.OFF_BOARD],
                                    add_stderr="gh: Bad Gateway (HTTP 502)\n")
