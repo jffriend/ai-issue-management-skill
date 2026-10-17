@@ -780,6 +780,7 @@ half_wired_head() {
   printf '\n' >&2
   printf 'Issue #%s EXISTS at %s.\n' "$NUM" "$URL" >&2
   printf '%s\n' "$HALF_WIRED_PROVENANCE" >&2
+  # shellcheck disable=SC2015  # every branch only echoes, so C cannot run after a true A
   printf 'Requested: parent=%s, position=%s, blocked-by=[%s], blocks=[%s].\n' \
     "${PARENT:-none}" \
     "$( [ "$CLOUD" -eq 1 ] && echo "decided later" || { [ "$TOP" -eq 1 ] && echo top || echo "after #$AFTER"; } )" \
@@ -1002,6 +1003,7 @@ board_membership_corroboration() {
 
 write_position() {
   # The one GraphQL call left: no REST route sets position (#14 KTD2). A 403 degrades position; else half-wired.
+  # shellcheck disable=SC2016  # GraphQL $variables must stay literal
   if [ -z "$1" ]; then
     gh_api graphql -f query='mutation($p:ID!,$i:ID!){updateProjectV2ItemPosition(input:{projectId:$p,itemId:$i}){clientMutationId}}' \
       -f p="$PROJECT_ID" -f i="$ITEM_ID" >/dev/null && return 0
@@ -1041,6 +1043,7 @@ board_half() {
   # A 422 "already exists" proves membership while the listing lags; the issue's own projectItems carries the item.
   if [ -z "$ITEM_ID" ] && printf '%s' "$add_err" | grep -qF "Content already exists"; then
     ADD_PROVED_MEMBER=1
+    # shellcheck disable=SC2016  # GraphQL $variables must stay literal
     take_item "$(gh_api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){projectItems(first:100){nodes{id databaseId project{id}}}}}}' \
       -f o="${REPO%%/*}" -f r="${REPO#*/}" -F n="$NUM" \
       | jq -r --arg p "$PROJECT_ID" '.data.repository.issue.projectItems.nodes[]? | select(.project.id == $p) | "\(.id)\t\(.databaseId)"' 2>/dev/null \

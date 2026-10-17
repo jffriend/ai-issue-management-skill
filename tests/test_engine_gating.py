@@ -1829,7 +1829,7 @@ def scan_for_duplicated_comparisons(path):
     except OSError as exc:
         raise AssertionError(
             "the shared-read-back scan could not read %s (%s). "
-            "Unable to look is not permission." % (path, exc))
+            "Unable to look is not permission." % (path, exc)) from exc
     if text.count(READ_BACK_START) != 1 or text.count(READ_BACK_END) != 1:
         raise AssertionError(
             "the shared read-back markers are missing or duplicated in %s. "
