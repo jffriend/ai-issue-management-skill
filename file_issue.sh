@@ -375,6 +375,7 @@ OWNER="$(jq -r '.owner // empty' "$CONFIG")"
 PROJECT_NUMBER="$(jq -r '.project_number // empty' "$CONFIG")"
 PROJECT_ID="$(jq -r '.project_id // empty' "$CONFIG")"
 PLAN_DIR="$(jq -r '.plan_dir // empty' "$CONFIG")"
+FILE_ISSUE_CMD="$(jq -r '.file_issue_cmd // empty' "$CONFIG")"
 DESIGN_LINE_REQUIRED="$(jq -r 'if (.design_line_required // false) then "true" else "false" end' "$CONFIG")"
 # human_review_required is a JSON boolean, missing meaning true. The engine
 # only validates it; the skill reads it to decide whether a human previews
@@ -1106,10 +1107,8 @@ reverify_command() {
   # a "could not look" refusal clearable instead of a dead end. It runs over
   # REST, so it works where GraphQL is refused.
   #
-  # The script and --config paths are the ones THIS run was given, so the
-  # command runs from wherever this one was run. It used to print
-  # `scripts/file_issue.sh` with no --config, which is neither this repo's
-  # layout nor a runnable command since --config became required.
+  # It leads with the config's file_issue_cmd when set: the script and
+  # --config paths this run was given may exist only in a cloud session.
   #
   # In cloud mode it is re-run from the same cloud session, which refuses
   # --after and --top, so it carries --position-later (#14 KTD10).
@@ -1127,8 +1126,10 @@ reverify_command() {
       position="--after $AFTER"
     fi
   fi
-  printf '  bash %q --config %q --adopt %s %s %s --blocked-by %s --blocks %s\n' \
-    "${BASH_SOURCE[0]}" "$CONFIG" \
+  local cmd="$FILE_ISSUE_CMD"
+  [ -n "$cmd" ] || cmd="$(printf 'bash %q --config %q' "${BASH_SOURCE[0]}" "$CONFIG")"
+  printf '  %s --adopt %s %s %s --blocked-by %s --blocks %s\n' \
+    "$cmd" \
     "$NUM" \
     "$( [ -n "$PARENT" ] && printf -- '--parent %s' "$PARENT" || printf -- '--no-parent' )" \
     "$position" \

@@ -18,6 +18,9 @@ argument-hint: [what the issue is about, or "adopt <N>"]
                             file_issue.sh with your --config baked in) or,
                             with no wrapper:
                               bash path/to/ai-issue-management-skill/file_issue.sh --config path/to/your-config.json
+                            Put the same value in your config's
+                            `file_issue_cmd`, so the commands the engine
+                            prints for a later run start with it too.
     {{CONFIG_PATH}}       — the repo-relative path to your own config.json
                             (e.g. scripts/file-issue.config.json). Needed
                             even when {{FILE_ISSUE_CMD}} is a wrapper that
