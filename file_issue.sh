@@ -840,6 +840,7 @@ half_wired_absent() {
 
 half_wired_unverified() {
   # POSITION UNVERIFIED: membership is proven, but the listing never caught up to show position; not a failed write.
+  [ "$MODE" = adopt ] && HALF_WIRED_PROVENANCE="Its wiring is not yet verified, and nothing here proved any of it wrong."
   half_wired_head "$1"
   printf 'Membership is PROVEN: a direct read of the board item of #%s returned it on\n' "$NUM" >&2
   printf 'project %s. Only the POSITION is unverified — the board listing was\n' "$PROJECT_NUMBER" >&2
@@ -1034,6 +1035,14 @@ board_half() {
     rows="$(read_board "${BOARD_JSON}.2")" \
       || half_wired_unreadable "the board (project $PROJECT_NUMBER) could not be re-read to find the item for #$NUM"
     take_item "$(board_row_item "$rows" "$NUM")"
+  fi
+  # A 422 "already exists" proves membership while the listing lags; the issue's own projectItems carries the item.
+  if [ -z "$ITEM_ID" ] && printf '%s' "$add_err" | grep -qF "Content already exists"; then
+    take_item "$(gh_api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){projectItems(first:100){nodes{id databaseId project{id}}}}}}' \
+      -f o="${REPO%%/*}" -f r="${REPO#*/}" -F n="$NUM" \
+      | jq -r --arg p "$PROJECT_ID" '.data.repository.issue.projectItems.nodes[]? | select(.project.id == $p) | "\(.id)\t\(.databaseId)"' 2>/dev/null \
+      | head -1)" \
+      || { add_err="$(gh_api_err)"; half_wired_unreadable "#$NUM is already on the board (project $PROJECT_NUMBER), but its board item could not be read${add_err:+ ($add_err)}"; }
   fi
   [ -n "$ITEM_ID" ] || half_wired "the board (project $PROJECT_NUMBER) did not return an item id for #$NUM${add_err:+ ($add_err)}"
 
