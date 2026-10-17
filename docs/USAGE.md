@@ -57,7 +57,7 @@ Board position is the one exception. All four answers are mandatory, so adopt al
 
 This is worth stating precisely, because the rule isn't the same for all four. **`blocked-by` and `blocks` accept the literal word `none` as a real answer**, and there's no such word for parent or position.
 
-Parent takes either a real issue number or the explicit `--no-parent` flag — there's no `--parent none`. Position always needs a real target: either `--after N` naming the issue it goes after, or `--top` for the front of the queue. There's no equivalent of "no position."
+Parent takes either a real issue number or the explicit `--no-parent` flag — there's no `--parent none`. Position always needs a real target: either `--after N` naming the issue it goes after, or `--top` for the front of the queue. There's no equivalent of "no position." The one exception is cloud mode, where the board can't be seen: there the position answer is `--position-later`, and `--after` and `--top` are refused (see below).
 
 All four flags are required either way. Leaving one blank isn't accepted as an answer — a missing answer stops the run and tells you exactly which flag to add.
 
@@ -79,11 +79,33 @@ Both modes support it, whatever `human_review_required` is set to. When you pass
 
 Nothing is created and nothing is changed at this point. Run the same command without `--dry-run` once the preview looks right. With `human_review_required` set to `true` (the default), the skill always previews first and waits for a person to approve.
 
-## Filing from a cloud session (`board position NOT SET`)
+## Filing from a cloud session (cloud mode, `needs-board`)
+
+**A Claude Code cloud session can file and adopt issues, but it can't touch the project board. The issue is labelled `needs-board` and placed later from a local session.**
+
+The cloud session's GitHub proxy refuses the board itself, not only GraphQL. So the tool runs in **cloud mode** there. It turns on by itself when the session sets `CLAUDE_CODE_REMOTE=true`, or with `--no-board` in any session. A board read that fails never turns it on: in a local session that still stops the run.
+
+In cloud mode:
+
+- The position answer is `--position-later`. `--after` and `--top` are refused, because nothing could check them.
+- The run creates or adopts the issue, checks for duplicates, writes the parent and blocking links, and labels it `needs-board` (in the create itself, or added on adopt if it's missing).
+- It reads all of that back. The two board lines say `not checked (cloud mode)`.
+- It exits 0 and ends by saying the issue is NOT on the board yet, with the local adopt command that places it.
+- `--dry-run` shows the duplicate check and the summary. There's no board neighborhood.
+
+```bash
+bash file_issue.sh --config config.json \
+    --title "..." --body-file body.md --shape work \
+    --no-parent --position-later --blocked-by none --blocks none
+```
+
+To place a `needs-board` issue, run adopt from a local session with a real position (`--after N` or `--top`). Once the position reads back, adopt removes the `needs-board` label and prints `needs-board        removed`. If the removal fails, a warning prints the `gh api -X DELETE` command to finish it by hand; the placement stands either way.
+
+## Where only GraphQL is refused (`board position NOT SET`)
 
 **Filing works where GitHub's GraphQL API is refused, except for setting the board position.**
 
-Every call the tool makes goes over GitHub's REST API, with one exception: moving an issue to its board position. GitHub has no REST route for that, so it still uses GraphQL. A Claude Code cloud session refuses GraphQL calls.
+Every call the tool makes goes over GitHub's REST API, with one exception: moving an issue to its board position. GitHub has no REST route for that, so it still uses GraphQL. This section is for a session that reaches the board over REST but not GraphQL. A Claude Code cloud session is refused the whole board, so it uses cloud mode instead.
 
 When the position write is refused (HTTP 403), the run still creates the issue, adds it to the board, writes its parent and blocking links, and reads all of them back. It exits 0. The read-back shows:
 

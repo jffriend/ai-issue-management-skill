@@ -66,6 +66,8 @@ You'll do five things: add this repo's code to yours, tell it which board and re
 | `design_line_required` | boolean | Whether a plan-derived issue (one whose body carries a `Design:` line into `plan_dir`) is required to have a parent. Set `false` if your repo has no such convention. |
 | `human_review_required` | boolean | Whether a person approves a preview before each filing. `true` (a human has to say yes to the `--dry-run` preview) or `false` (the agent files in one run). Optional — defaults to `true` if omitted. See `docs/CONCEPTS.md` for what each value does. |
 
+Cloud mode, for filing from a Claude Code cloud session, needs no extra config. It labels each cloud-filed issue `needs-board`. If GitHub does not create that label on first use in your repo, create it once (`gh label create needs-board`) so cloud filings can carry it.
+
 The tool checks all of this before making any network call. A missing or empty required field, a `repo` not in `OWNER/NAME` form, a non-numeric `project_number`, an empty `shapes` list, a shape with no labels, or a `human_review_required` value other than `true`/`false` all fail immediately with the specific field named, rather than surfacing later as a confusing error partway through a write.
 
 ### Choosing `human_review_required`

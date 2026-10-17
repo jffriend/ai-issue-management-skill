@@ -2126,6 +2126,8 @@ class Usage(unittest.TestCase):
         self.assertIn("--body-file", out)
         self.assertIn("--dry-run", out)
         self.assertIn("--blocked-by", out)
+        self.assertIn("--no-board", out)
+        self.assertIn("--position-later", out)
         for shell in ("set -uo pipefail", "die()", 'case "$1"', "${BASH_SOURCE",
                       "HELP BLOCK"):
             self.assertNotIn(shell, out,

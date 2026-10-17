@@ -50,7 +50,7 @@
 #         (--after N | --top) \
 #         (--blocked-by N,N | --blocked-by none) \
 #         (--blocks N,N | --blocks none) \
-#         [--dry-run] [--file-anyway]
+#         [--dry-run] [--file-anyway] [--no-board]
 #
 #   ADOPT an issue that already exists and wire it:
 #     bash file_issue.sh --config config.json --adopt N \
@@ -58,7 +58,10 @@
 #         (--after N | --top) \
 #         (--blocked-by N,N | --blocked-by none) \
 #         (--blocks N,N | --blocks none) \
-#         [--dry-run]
+#         [--dry-run] [--no-board]
+#
+#   In cloud mode the position answer is --position-later in place of
+#   (--after N | --top); see CLOUD MODE below.
 #
 #   --shape is one of the names in --config's `shapes` list. It sets the
 #   labels that config names for it. It belongs to create only.
@@ -79,15 +82,29 @@
 #   where you are sending it, and the move is recorded as a comment on the
 #   issue once the read-back proves it landed.
 #
-#   WHERE GRAPHQL IS REFUSED (a Claude Code cloud session, for one). Every
-#   call goes over GitHub's REST API except the board-position write, which
-#   has no REST route. When GitHub refuses that write with HTTP 403, the run
-#   still files and wires the issue, reads every relationship back, and exits
-#   0. The read-back says the board position is NOT SET, the issue sits wherever
-#   the board put it (usually the bottom), and a notice prints the adopt
-#   command that places it from a session where GraphQL works. No move
-#   comment is written in that case, because nothing moved; the adopt run
-#   that places it later records its own move.
+#   CLOUD MODE (a Claude Code cloud session). The session's GitHub proxy
+#   refuses the project board itself, so the board cannot be read, added to
+#   or placed on. Cloud mode turns on when CLAUDE_CODE_REMOTE=true, or with
+#   --no-board in any session; a refused board read never turns it on. It
+#   skips every board call, takes --position-later as the position answer
+#   (--after and --top are refused, since nothing could check them), runs the
+#   duplicate check, writes the parent and both kinds of blocking link, and
+#   labels the issue needs-board. It reads all of that back, prints the two
+#   board lines as "not checked (cloud mode)", and ends with a notice that the
+#   issue is not on the board yet. --dry-run shows the duplicate check and the
+#   summary; there is no board neighbourhood. Place the issue later with a
+#   local adopt naming --after N or --top; once that placement reads back,
+#   the adopt removes the needs-board label.
+#
+#   WHERE ONLY GRAPHQL IS REFUSED. Every call goes over GitHub's REST API
+#   except the board-position write, which has no REST route. In a session
+#   that reaches the board over REST but not GraphQL, a position write
+#   refused with HTTP 403 still files and wires the issue, reads every
+#   relationship back, and exits 0. The read-back says the board position is
+#   NOT SET, the issue sits wherever the board put it (usually the bottom),
+#   and a notice prints the adopt command that places it from a session
+#   where GraphQL works. No move comment is written in that case, because
+#   nothing moved; the adopt run that places it later records its own move.
 #
 #   There is no confirmation prompt; a run without --dry-run writes. The one
 #   exception is a create run that finds possible duplicates: it prints them
@@ -96,6 +113,9 @@
 #
 #   --dry-run stops after the board neighbourhood, the duplicate check and the
 #   summary. Nothing is created and nothing is changed.
+#
+#   --no-board turns on cloud mode in any session. --position-later is the
+#   cloud-mode position answer and is refused outside cloud mode.
 #
 #   BODIES AND COMMENTS. This script never edits the body of an issue that
 #   already exists — adopt refuses --body-file for that reason. But the rule

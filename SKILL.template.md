@@ -141,6 +141,9 @@ because the engine digit-validates the first two and refuses.
 2. **Position** — where on the board? Either the issue number it should sit
    behind, or *top of board*. There is no "none" at all: an unpositioned issue
    lands wherever the board dropped it, which is not a priority decision.
+   **In a Claude Code cloud session the answer is `--position-later`, and only
+   that.** The board cannot be seen from there, so any position you named
+   would be a guess; see "Filing from a cloud session" below.
 3. **Blocked by** — what must finish before this can start? Issue numbers, or
    the literal `none`.
 4. **Blocks** — what must not start until this is done? Issue numbers, or the
@@ -253,6 +256,29 @@ preview, show that output to the caller and wait again.
 If the board listing cannot be trusted, the engine stops rather than filing
 against a partial board. Never work around that refusal, or any other.
 
+### Filing from a cloud session
+
+A Claude Code cloud session cannot reach the project board at all. The engine
+knows this from the session's environment (`CLAUDE_CODE_REMOTE=true`) and
+turns on **cloud mode** by itself; the first line of its output then starts
+`cloud mode        on`. In cloud mode:
+
+- Answer the position with `--position-later`. `--after` and `--top` are
+  refused.
+- The engine creates or wires the issue, writes its parent and blocking links,
+  labels it `needs-board`, and reads all of that back. It does not touch the
+  board.
+- The dry run shows the duplicate check and the summary, but no board
+  neighbourhood.
+
+If a run in a cloud session does **not** print that `cloud mode` line and
+instead stops with "the board listing is not trustworthy" and "sessions are
+bound to their configured repositories", the environment signal was missing.
+Re-run the same command with `--no-board` and `--position-later` added in
+place of the position. That is the only time to add `--no-board`: never add it
+to get past that refusal anywhere else, because there it means the board
+listing is broken, not out of reach.
+
 ## Step 4 — exit 3: possible duplicates
 
 A create run that finds possible duplicates prints them, creates nothing, and
@@ -276,7 +302,8 @@ their answer.
 
 The engine reads every relationship back after writing and prints a
 `READ-BACK` block: board membership, board position, parent, blocked-by,
-blocks.
+blocks. In cloud mode the two board lines say `not checked (cloud mode)` and a
+`needs-board` line follows the others.
 
 **Quote those lines.** Do not assert that the filing succeeded — an exit code
 is not evidence that a write landed. Report position and dependencies as
@@ -296,8 +323,22 @@ tell the caller it failed
 and that you posted it by hand. Never treat a zero exit as evidence the move
 record landed.
 
-**A third outcome in either mode: `board position NOT SET`.** Where GitHub
-refuses GraphQL (a Claude Code cloud session, for one), the engine cannot set
+**A cloud-mode filing ends `NOT on the board yet`, and that is the outcome to
+report, not a failure.** It exits 0 once everything it wrote reads back, and a
+`NOT ON THE BOARD YET` notice prints the local adopt command that places it.
+Quote the read-back and that notice to the caller, and say plainly that the
+issue is not on the board and carries the `needs-board` label until it is
+placed from a local session. Do not try to place it from the cloud session by
+any other route.
+
+**In adopt mode, a local placement of a `needs-board` issue removes the
+label.** Once the position reads back, the engine prints `needs-board
+removed`. If instead it prints `WARNING: ... its needs-board label was NOT
+removed`, the placement is correct and stands; run the `gh api -X DELETE`
+command it printed, then tell the caller.
+
+**Another outcome in either mode: `board position NOT SET`.** In a session
+that reaches the board but where GitHub refuses GraphQL, the engine cannot set
 the board position. It still files and wires the issue, reads everything back,
 and exits 0, but the read-back says `board position     NOT SET` and a
 `BOARD POSITION NOT SET` notice prints an adopt command. Quote that notice to
@@ -315,7 +356,8 @@ covers filing.
 
 ## What this skill must never do
 
-- Write to the board by any route other than {{FILE_ISSUE_CMD}}.
+- Write to the board by any route other than {{FILE_ISSUE_CMD}}. In a cloud
+  session that means not reaching the board at all.
 - File work that is a small fix in a file this session is already touching.
 - Run without `--dry-run` under `human_review_required: true` before a human
   has approved the verbatim preview.
