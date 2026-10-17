@@ -141,6 +141,9 @@ because the engine digit-validates the first two and refuses.
 2. **Position** — where on the board? Either the issue number it should sit
    behind, or *top of board*. There is no "none" at all: an unpositioned issue
    lands wherever the board dropped it, which is not a priority decision.
+   **In a Claude Code cloud session the answer is `--position-later`, and only
+   that.** The board cannot be seen from there, so any position you named
+   would be a guess; see "Filing from a cloud session" below.
 3. **Blocked by** — what must finish before this can start? Issue numbers, or
    the literal `none`.
 4. **Blocks** — what must not start until this is done? Issue numbers, or the
@@ -228,7 +231,9 @@ came from in a comment on the issue once the read-back proves the move.
 
 Run the command **with `--dry-run` appended**. It prints the board
 neighbourhood, the possible duplicates (create mode only), and the summary,
-and writes nothing.
+and writes nothing. In cloud mode there is no neighbourhood (the preview says
+it is not available) and the summary gives the position as `decided later`;
+tell the caller so, rather than asking them to check a position.
 
 ```bash
 {{FILE_ISSUE_CMD}} <the arguments you built> --dry-run
@@ -251,7 +256,44 @@ preview, show that output to the caller and wait again.
 ### Either setting
 
 If the board listing cannot be trusted, the engine stops rather than filing
-against a partial board. Never work around that refusal, or any other.
+against a partial board. Never work around that refusal, or any other. There
+is one named exception: a board read refused with the cloud proxy's
+"sessions are bound to their configured repositories" message is answered by
+re-running with `--no-board` (see "Filing from a cloud session"). Nothing else
+is.
+
+### Filing from a cloud session
+
+A Claude Code cloud session cannot reach the project board at all. The engine
+knows this from the session's environment (`CLAUDE_CODE_REMOTE=true`) and
+turns on **cloud mode** by itself; the first line of its output then starts
+`cloud mode        on`. In cloud mode:
+
+- Answer the position with `--position-later`. `--after` and `--top` are
+  refused.
+- The engine creates or wires the issue, writes its parent and blocking links,
+  labels it `needs-board`, and reads all of that back. It does not touch the
+  board.
+- The dry run shows the duplicate check and the summary, but no board
+  neighbourhood.
+
+The one trigger for `--no-board` is the cloud proxy's refusal. If a run stops
+with "the board listing is not trustworthy" **and** its message contains
+"sessions are bound to their configured repositories", the environment signal
+was missing. Re-run the same command with `--no-board` and `--position-later`
+in place of the position. The engine reads the board once more and turns cloud
+mode on only if the proxy refuses it again; if the board reads fine it refuses
+`--no-board`. Any other "not trustworthy" message means the board listing is
+broken, not out of reach: never add `--no-board` for it. This is the one
+exception to "never work around a refusal".
+
+The same missing signal can show up earlier: in a cloud session, a run you
+gave `--position-later` stops with "--position-later is for cloud mode only"
+before it reads the board. Re-run it with `--no-board` added. The engine then
+reads the board itself and keeps cloud mode only if the proxy refuses it, so
+the proxy's refusal is still the trigger. If the engine instead refuses
+`--no-board` because it read the board, this session can see the board: ask
+the caller for `--after N` or `--top` and run it as a local filing.
 
 ## Step 4 — exit 3: possible duplicates
 
@@ -276,7 +318,9 @@ their answer.
 
 The engine reads every relationship back after writing and prints a
 `READ-BACK` block: board membership, board position, parent, blocked-by,
-blocks.
+blocks. In cloud mode the two board lines say `not checked (cloud mode)` and a
+`needs-board` line follows the others; report the position as decided later,
+never as set.
 
 **Quote those lines.** Do not assert that the filing succeeded — an exit code
 is not evidence that a write landed. Report position and dependencies as
@@ -296,8 +340,32 @@ tell the caller it failed
 and that you posted it by hand. Never treat a zero exit as evidence the move
 record landed.
 
-**A third outcome in either mode: `board position NOT SET`.** Where GitHub
-refuses GraphQL (a Claude Code cloud session, for one), the engine cannot set
+**A cloud-mode filing ends saying the board was not checked, and that is the
+outcome to report, not a failure.** It exits 0 once everything it wrote reads
+back, and a `BOARD NOT CHECKED` notice prints the local adopt command that
+places it. Quote the read-back and that notice to the caller. Say plainly that
+the board was not checked from the cloud, that the issue may already be on it
+at a spot nobody chose (a board can add sub-issues to its bottom
+automatically), and that it carries the `needs-board` label until it is placed
+from a local session. Relay the notice's command exactly as printed, with its
+`(--after N | --top)` left for the caller to choose: do not pick a position
+for them. Do not try to place it from the cloud session by any other route.
+
+**If the `needs-board` label reads back absent**, the run stops half-wired and
+prints the adopt command that adds it. Fix it with that command and nothing
+else; do not add the label by hand or with any other call. If the label still
+does not land, the repo may not have it yet: tell the caller it may need
+creating once (`gh label create needs-board`) from a session that can, then
+re-run the printed command.
+
+**In adopt mode, a local placement of a `needs-board` issue removes the
+label.** Once the position reads back, the engine prints `needs-board
+removed`. If instead it prints `WARNING: ... its needs-board label was NOT
+removed`, the placement is correct and stands; run the `gh api -X DELETE`
+command it printed, then tell the caller.
+
+**Another outcome in either mode: `board position NOT SET`.** In a session
+that reaches the board but where GitHub refuses GraphQL, the engine cannot set
 the board position. It still files and wires the issue, reads everything back,
 and exits 0, but the read-back says `board position     NOT SET` and a
 `BOARD POSITION NOT SET` notice prints an adopt command. Quote that notice to
@@ -315,10 +383,13 @@ covers filing.
 
 ## What this skill must never do
 
-- Write to the board by any route other than {{FILE_ISSUE_CMD}}.
+- Write to the board by any route other than {{FILE_ISSUE_CMD}}. In a cloud
+  session that means not reaching the board at all.
 - File work that is a small fix in a file this session is already touching.
 - Run without `--dry-run` under `human_review_required: true` before a human
   has approved the verbatim preview.
 - Pass `--file-anyway` without having read every listed match.
 - Work around any refusal the engine raises. Every one of them was paid for.
+  The one named exception: re-running with `--no-board` after a board read
+  refused with "sessions are bound to their configured repositories".
 - Restate the engine's flags from memory instead of reading its usage.

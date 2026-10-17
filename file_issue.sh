@@ -50,7 +50,7 @@
 #         (--after N | --top) \
 #         (--blocked-by N,N | --blocked-by none) \
 #         (--blocks N,N | --blocks none) \
-#         [--dry-run] [--file-anyway]
+#         [--dry-run] [--file-anyway] [--no-board]
 #
 #   ADOPT an issue that already exists and wire it:
 #     bash file_issue.sh --config config.json --adopt N \
@@ -58,7 +58,10 @@
 #         (--after N | --top) \
 #         (--blocked-by N,N | --blocked-by none) \
 #         (--blocks N,N | --blocks none) \
-#         [--dry-run]
+#         [--dry-run] [--no-board]
+#
+#   In cloud mode the position answer is --position-later in place of
+#   (--after N | --top); see CLOUD MODE below.
 #
 #   --shape is one of the names in --config's `shapes` list. It sets the
 #   labels that config names for it. It belongs to create only.
@@ -79,15 +82,33 @@
 #   where you are sending it, and the move is recorded as a comment on the
 #   issue once the read-back proves it landed.
 #
-#   WHERE GRAPHQL IS REFUSED (a Claude Code cloud session, for one). Every
-#   call goes over GitHub's REST API except the board-position write, which
-#   has no REST route. When GitHub refuses that write with HTTP 403, the run
-#   still files and wires the issue, reads every relationship back, and exits
-#   0. The read-back says the board position is NOT SET, the issue sits wherever
-#   the board put it (usually the bottom), and a notice prints the adopt
-#   command that places it from a session where GraphQL works. No move
-#   comment is written in that case, because nothing moved; the adopt run
-#   that places it later records its own move.
+#   CLOUD MODE (a Claude Code cloud session). The session's GitHub proxy
+#   refuses the project board itself, so the board cannot be read, added to
+#   or placed on. Cloud mode turns on when CLAUDE_CODE_REMOTE=true. Without
+#   it, --no-board reads the board first and turns cloud mode on only if the
+#   read is refused with the cloud proxy's "sessions are bound to their
+#   configured repositories" message; a readable board refuses --no-board,
+#   and any other failed read stops the run as it does locally. Cloud mode
+#   skips every board call, takes --position-later as the position answer
+#   (--after and --top are refused, since nothing could check them), runs the
+#   duplicate check, writes the parent and both kinds of blocking link, and
+#   labels the issue needs-board. It reads all of that back, prints the two
+#   board lines as "not checked (cloud mode)", and ends with a notice that the
+#   board was not checked: the issue may already be on it at a spot nobody
+#   chose, since sub-issues can be added automatically. --dry-run shows the
+#   duplicate check and the summary; there is no board neighbourhood. Place
+#   the issue later with a local adopt naming --after N or --top; once that
+#   placement reads back, the adopt removes the needs-board label.
+#
+#   WHERE ONLY GRAPHQL IS REFUSED. Every call goes over GitHub's REST API
+#   except the board-position write, which has no REST route. In a session
+#   that reaches the board over REST but not GraphQL, a position write
+#   refused with HTTP 403 still files and wires the issue, reads every
+#   relationship back, and exits 0. The read-back says the board position is
+#   NOT SET, the issue sits wherever the board put it (usually the bottom),
+#   and a notice prints the adopt command that places it from a session
+#   where GraphQL works. No move comment is written in that case, because
+#   nothing moved; the adopt run that places it later records its own move.
 #
 #   There is no confirmation prompt; a run without --dry-run writes. The one
 #   exception is a create run that finds possible duplicates: it prints them
@@ -221,6 +242,29 @@ BLOCKS=""
 BLOCKS_SET=0
 DRY_RUN=0
 FILE_ANYWAY=0
+# CLOUD MODE (#14). A Claude Code cloud session's GitHub proxy refuses the
+# user-owned board -- every users/{owner}/projectsV2/... path, not only
+# GraphQL (measured 2026-10-16). So a run there cannot read the board, add to
+# it or place on it. Cloud mode skips the board entirely, takes the position
+# answer as "decided later", and labels the issue BOARD_PENDING_LABEL so a
+# local session can find it and place it.
+#
+# It is turned on by the session's own environment, or by --no-board once the
+# board read is refused with the cloud proxy's own message (CLOUD_PROXY_REFUSAL).
+# Never by any other failed board read: a local token without board access
+# must still stop at "the board listing is not trustworthy" rather than
+# quietly file off the board (docs/solutions/best-practices/the-exemption-
+# that-makes-a-guard-writable-is-the-hole.md). And never by --no-board alone:
+# a flag honoured in any session would be exactly that exemption, so a board
+# that reads fine refuses it (#14 R2).
+NO_BOARD=0
+POSITION_LATER=0
+CLOUD=0
+CLOUD_REASON=""
+CLOUD_UNCONFIRMED=0   # --no-board without the environment: proven at the board read
+CLOUD_PROXY_REFUSAL="sessions are bound to their configured repositories"
+BOARD_PENDING_LABEL="needs-board"
+FOUND_LABEL=""   # adopt: whether the issue already carries BOARD_PENDING_LABEL
 
 die() { printf '%s\n' "$*" >&2; exit 1; }
 
@@ -286,10 +330,26 @@ while [ $# -gt 0 ]; do
     --blocks)     BLOCKS="${2-}"; BLOCKS_SET=1; shift 2 || die "ERROR: --blocks needs a value." ;;
     --dry-run)    DRY_RUN=1; shift ;;
     --file-anyway) FILE_ANYWAY=1; shift ;;
+    --no-board)   NO_BOARD=1; shift ;;
+    --position-later) POSITION_LATER=1; shift ;;
     -h|--help)    usage; exit 0 ;;
     *)            die "ERROR: unknown flag: $1" ;;
   esac
 done
+
+# Only the exact value Claude Code sets in a cloud session counts (#14 KTD2).
+if [ "${CLAUDE_CODE_REMOTE:-}" = "true" ]; then
+  CLOUD=1
+  CLOUD_REASON="CLAUDE_CODE_REMOTE=true"
+fi
+if [ "$NO_BOARD" -eq 1 ]; then
+  # The position answers are checked as cloud-mode answers from here, offline.
+  # Without the environment, the board read below must still prove the board
+  # is refused by the cloud proxy before anything is written.
+  [ "$CLOUD" -eq 1 ] || CLOUD_UNCONFIRMED=1
+  CLOUD=1
+  CLOUD_REASON="${CLOUD_REASON:+$CLOUD_REASON and }--no-board"
+fi
 
 if [ -n "$ADOPT" ]; then MODE=adopt; else MODE=create; fi
 if [ "$MODE" = adopt ]; then NOTHING="Nothing was changed."; else NOTHING="Nothing was created."; fi
@@ -384,6 +444,8 @@ else
   while IFS= read -r lbl; do
     [ -n "$lbl" ] && LABEL_FIELDS+=(-f "labels[]=$lbl")
   done <<<"$SHAPE_LABELS"
+  # In the create itself, so a cloud-filed issue never exists without it (#14 R8).
+  [ "$CLOUD" -eq 1 ] && LABEL_FIELDS+=(-f "labels[]=$BOARD_PENDING_LABEL")
 fi
 
 if [ -n "$PARENT" ] && [ "$NO_PARENT" -eq 1 ]; then
@@ -404,13 +466,31 @@ if [ -n "$PARENT" ]; then
   esac
 fi
 
-if [ -n "$AFTER" ] && [ "$TOP" -eq 1 ]; then
-  die "ERROR: --after and --top are contradictory. Pass exactly one. $NOTHING"
-fi
-if [ -z "$AFTER" ] && [ "$TOP" -eq 0 ]; then
-  die "ERROR: no board-position answer. Pass --after <N> or --top.
+# The position answer depends on the mode (#14 R5-R7). Cloud mode cannot see
+# the board, so a position named there would be a blind guess that nothing
+# checks: it takes --position-later instead, and refuses --after and --top.
+# A local run can see the board, so it may not defer.
+if [ "$CLOUD" -eq 1 ]; then
+  if [ -n "$AFTER" ] || [ "$TOP" -eq 1 ]; then
+    die "ERROR: cloud mode ($CLOUD_REASON) cannot see the board, so it cannot check
+       --after or --top. Pass --position-later instead; the issue is labelled
+       $BOARD_PENDING_LABEL and placed later from a local session. $NOTHING"
+  fi
+  [ "$POSITION_LATER" -eq 1 ] || die "ERROR: no board-position answer. In cloud mode ($CLOUD_REASON) pass
+       --position-later: the board cannot be seen from here, so the position is
+       decided later, from a local session. $NOTHING"
+else
+  [ "$POSITION_LATER" -eq 0 ] || die "ERROR: --position-later is for cloud mode only (a Claude Code cloud
+       session, or --no-board). This run can see the board, so pass --after <N>
+       or --top. $NOTHING"
+  if [ -n "$AFTER" ] && [ "$TOP" -eq 1 ]; then
+    die "ERROR: --after and --top are contradictory. Pass exactly one. $NOTHING"
+  fi
+  if [ -z "$AFTER" ] && [ "$TOP" -eq 0 ]; then
+    die "ERROR: no board-position answer. Pass --after <N> or --top.
        Every issue answers this. There is no default — an unpositioned issue
        lands wherever the board put it, which is not a priority decision."
+  fi
 fi
 # --after is an ISSUE NUMBER too, and it is validated for a second reason on
 # top of the typo one: the board lookups that use it are grep matches, and an
@@ -535,6 +615,9 @@ probe_gh_capability() {
   echo "gh capability     ok (gh $GH_VERSION)"
 }
 
+if [ "$CLOUD" -eq 1 ] && [ "$CLOUD_UNCONFIRMED" -eq 0 ]; then
+  echo "cloud mode        on ($CLOUD_REASON): the board is not read or written"
+fi
 probe_gh_capability
 
 # ---------------------------------------------------------------------------
@@ -557,6 +640,34 @@ trap cleanup EXIT
 gh_api() { gh api "$@" 2>"$GH_API_ERR"; }
 gh_api_failed_with() { grep -qF "(HTTP $1)" "$GH_API_ERR"; }
 gh_api_err() { tr '\n' ' ' <"$GH_API_ERR"; }
+
+board_untrusted() {
+  # Why a failed board read stops the run. $BOARD_ERR holds board.sh's stderr.
+  printf 'ERROR: the board listing is not trustworthy — %s\n' "$(tr '\n' ' ' <"$BOARD_ERR")" >&2
+  printf 'A truncated board reads exactly like a short one. Refusing to go on.\n' >&2
+}
+
+# --no-board without the environment signal (#14 R2). One board read decides:
+# refused with the cloud proxy's message, this is a cloud session and cloud
+# mode stands; readable, this session can see the board, so --no-board is
+# refused; failed any other way, the run stops exactly as a local run does.
+if [ "$CLOUD_UNCONFIRMED" -eq 1 ]; then
+  if bash "$SCRIPT_DIR/board.sh" --config "$CONFIG" "$BOARD_JSON" 2>"$BOARD_ERR"; then
+    die "REFUSED: --no-board is for a session whose board read is refused by the
+       Claude Code cloud proxy. This session read the board, so it must check
+       the position against it: drop --no-board and --position-later and pass
+       --after <N> or --top. $NOTHING"
+  fi
+  # Both the proxy's phrase and gh's 403 suffix, so no other failure whose
+  # text happens to quote the phrase can pass for the refusal.
+  if ! grep -qF "$CLOUD_PROXY_REFUSAL" "$BOARD_ERR" \
+     || ! grep -qF "(HTTP 403)" "$BOARD_ERR"; then
+    board_untrusted
+    exit 1
+  fi
+  CLOUD_REASON="--no-board, and the cloud proxy refused the board"
+  echo "cloud mode        on ($CLOUD_REASON): the board is not read or written"
+fi
 
 issue_numeric_id() {
   # $1 an issue number. Prints the issue's numeric REST `id` -- what the
@@ -602,6 +713,20 @@ issue_reply_parent() {
       elif ($u | type) == "string" and ($u | test("/[0-9]+$")) then ($u | capture("/(?<n>[0-9]+)$").n)
       else "BAD" end' 2>/dev/null)" || out="BAD"
   printf '%s\n' "$out"
+}
+
+issue_reply_label() {
+  # $1 a `GET repos/{repo}/issues/{n}` reply, $2 a label name. Prints present,
+  # absent, or BAD. Absent is a legal answer, so the reply must carry a
+  # `labels` ARRAY: a reply without one -- an error reply -- would otherwise
+  # read as "absent", which is exactly what a removed label reads as (#14 KTD6).
+  local out
+  out="$(printf '%s' "$1" | jq -r --arg l "$2" '
+    if (.labels | type) == "array"
+    then (if any(.labels[]; (if type == "object" then .name else . end) == $l)
+          then "present" else "absent" end)
+    else "BAD" end' 2>/dev/null)" || out="BAD"
+  printf '%s\n' "${out:-BAD}"
 }
 
 dependency_entries() {
@@ -671,6 +796,12 @@ if [ "$MODE" = adopt ]; then
   FOUND_PARENT="$(issue_reply_parent "$ADOPT_JSON")"
   [ "$FOUND_PARENT" != "BAD" ] || die "ERROR: --adopt $ADOPT — the parent of #$ADOPT could not be read from $REPO.
        The reply's parent_issue_url is not an issue URL. $NOTHING"
+
+  # Whether it already carries the board-pending label: a cloud adopt adds it
+  # only when absent, a local placement removes it only when present (#14 KTD7).
+  FOUND_LABEL="$(issue_reply_label "$ADOPT_JSON" "$BOARD_PENDING_LABEL")"
+  [ "$FOUND_LABEL" != "BAD" ] || die "ERROR: --adopt $ADOPT — the labels of #$ADOPT could not be read from $REPO.
+       The reply carries no labels list. $NOTHING"
 
   # The ids are kept beside the numbers, as "number:id:owner/name": the
   # remedies below name them.
@@ -769,8 +900,7 @@ read_board() {
   # numberless, and the REST one gives a pull request a number.
   local out="$1"
   if ! bash "$SCRIPT_DIR/board.sh" --config "$CONFIG" "$out" 2>"$BOARD_ERR"; then
-    printf 'ERROR: the board listing is not trustworthy — %s\n' "$(tr '\n' ' ' <"$BOARD_ERR")" >&2
-    printf 'A truncated board reads exactly like a short one. Refusing to go on.\n' >&2
+    board_untrusted
     return 1
   fi
   jq -s -r '[.[][]]
@@ -778,6 +908,14 @@ read_board() {
             | "\(.content.number)\t\(.content.title)\t\(.node_id)\t\(.id)"' "$out"
 }
 
+if [ "$CLOUD" -eq 1 ]; then
+  # Cloud mode reads no board (#14 R10), so there is no listing to check
+  # --after against and no neighbourhood to show (R11).
+  BOARD_ROWS=""
+  BOARD_NUMS=""
+  echo "BOARD NEIGHBOURHOOD — not available in cloud mode (the board is not read)"
+  echo
+else
 BOARD_ROWS="$(read_board "$BOARD_JSON")" || exit 1
 BOARD_NUMS="$(printf '%s\n' "$BOARD_ROWS" | cut -f1)"
 
@@ -801,6 +939,7 @@ else
   printf '%s\n' "$BOARD_ROWS" | sed -n "$(( IDX + 1 )),$(( IDX + NEIGHBOURS ))p" | awk -F'\t' '{printf "      #%-6s %s\n", $1, substr($2,1,70)}'
 fi
 echo
+fi
 
 if [ "$MODE" = create ]; then
   # The duplicate-title check answers a question that only arises for an issue
@@ -855,7 +994,12 @@ if [ "$MODE" = create ]; then
 fi
 
 if [ "$MODE" = adopt ]; then
-  ADOPT_TITLE="$(printf '%s\n' "$BOARD_ROWS" | awk -F'\t' -v n="$ADOPT" '$1 == n {print $2; exit}')"
+  if [ "$CLOUD" -eq 1 ]; then
+    # No board rows in cloud mode; the issue reply carries its own title (R9).
+    ADOPT_TITLE="$(printf '%s' "$ADOPT_JSON" | jq -r '.title // ""' 2>/dev/null)"
+  else
+    ADOPT_TITLE="$(printf '%s\n' "$BOARD_ROWS" | awk -F'\t' -v n="$ADOPT" '$1 == n {print $2; exit}')"
+  fi
   echo "ABOUT TO WIRE AN EXISTING ISSUE"
   echo "  issue      #$ADOPT ${ADOPT_TITLE:-(not currently on the board)}"
 else
@@ -877,7 +1021,11 @@ echo "  parent     ${PARENT:-none}"
 # The fix is disclosure: name the current slot beside the requested one, and
 # say plainly when confirming will move it.
 POSITION_LINE="$( [ "$TOP" -eq 1 ] && echo "top of board" || echo "after #$AFTER" )"
-if [ "$MODE" = adopt ]; then
+if [ "$CLOUD" -eq 1 ]; then
+  # Nothing here moves in cloud mode, so there is no current slot to name and
+  # no move to latch: ADOPT_MOVED stays 0 and no move comment is written.
+  POSITION_LINE="decided later (cloud mode; labelled $BOARD_PENDING_LABEL for a local session to place)"
+elif [ "$MODE" = adopt ]; then
   ADOPT_IDX="$(printf '%s\n' "$BOARD_NUMS" | grep -nxF -- "$ADOPT" | head -1 | cut -d: -f1)"
   if [ -z "$ADOPT_IDX" ]; then
     POSITION_LINE="$POSITION_LINE  (not currently on the board)"
@@ -946,7 +1094,7 @@ half_wired_head() {
   printf '%s\n' "$HALF_WIRED_PROVENANCE" >&2
   printf 'Requested: parent=%s, position=%s, blocked-by=[%s], blocks=[%s].\n' \
     "${PARENT:-none}" \
-    "$( [ "$TOP" -eq 1 ] && echo top || echo "after #$AFTER" )" \
+    "$( [ "$CLOUD" -eq 1 ] && echo "decided later" || { [ "$TOP" -eq 1 ] && echo top || echo "after #$AFTER"; } )" \
     "$(printf '%s' "$BLOCKED_LIST" | tr '\n' ' ')" \
     "$(printf '%s' "$BLOCKS_LIST" | tr '\n' ' ')" >&2
 }
@@ -962,11 +1110,28 @@ reverify_command() {
   # command runs from wherever this one was run. It used to print
   # `scripts/file_issue.sh` with no --config, which is neither this repo's
   # layout nor a runnable command since --config became required.
+  #
+  # In cloud mode it is re-run from the same cloud session, which refuses
+  # --after and --top, so it carries --position-later (#14 KTD10).
+  #
+  # $1, when given, replaces the position answer: the cloud notice prints the
+  # command a LOCAL session runs, whose position is still to be chosen.
+  local position="${1-}"
+  if [ -z "$position" ]; then
+    if [ "$CLOUD" -eq 1 ]; then
+      position="--position-later"
+      [ "$NO_BOARD" -eq 1 ] && position="--no-board $position"
+    elif [ "$TOP" -eq 1 ]; then
+      position="--top"
+    else
+      position="--after $AFTER"
+    fi
+  fi
   printf '  bash %q --config %q --adopt %s %s %s --blocked-by %s --blocks %s\n' \
     "${BASH_SOURCE[0]}" "$CONFIG" \
     "$NUM" \
     "$( [ -n "$PARENT" ] && printf -- '--parent %s' "$PARENT" || printf -- '--no-parent' )" \
-    "$( [ "$TOP" -eq 1 ] && printf -- '--top' || printf -- '--after %s' "$AFTER" )" \
+    "$position" \
     "$( [ -n "$BLOCKED_LIST" ] && csv_of "$BLOCKED_LIST" || printf 'none' )" \
     "$( [ -n "$BLOCKS_LIST" ] && csv_of "$BLOCKS_LIST" || printf 'none' )"
 }
@@ -1172,6 +1337,12 @@ else
   else
     write_links "$ADD_PARENT" "$ADD_BLOCKED_PAIRS" "$ADD_BLOCKING"
   fi
+  # A delta like the links: added only when it is not already there, and the
+  # read-back proves it either way (#14 R9).
+  if [ "$CLOUD" -eq 1 ] && [ "$FOUND_LABEL" = absent ]; then
+    post_link "the $BOARD_PENDING_LABEL label" "repos/$REPO/issues/$NUM/labels" \
+      -f "labels[]=$BOARD_PENDING_LABEL"
+  fi
   echo "wiring #$NUM  $URL"
 fi
 
@@ -1258,6 +1429,10 @@ board_half() {
   #
   # Calls half_wired directly, so it MUST be invoked in the current shell.
   local add_err="" after_item rows
+  # Cloud mode never touches the board (#14 R10). Returning here, rather than
+  # skipping the call, keeps the call site the bare line OneImplementation
+  # requires.
+  [ "$CLOUD" -eq 1 ] && return 0
   # An adopted issue already on the board takes its item from the pre-write
   # listing, so it does not depend on item-add's output: item-add refuses an
   # issue already there, and that would abort a correctly wired filing.
@@ -1325,18 +1500,11 @@ read_dependency_numbers() {
   DEPENDENCY_NUMBERS="$(norm "$(entry_numbers "$entries")")"
 }
 
-read_back() {
-  # Compares every relationship against the four answers.
+read_back_board() {
+  # The board half of read_back: membership and position. Called only from
+  # read_back, in the current shell, because it calls half_wired_* directly.
+  # Cloud mode does not call it (#14 R13).
   #
-  # Takes NO arguments, and reads the globals $NUM and $URL, for the same
-  # reason board_half does: its failure path falls through to half_wired_head,
-  # which prints the globals. A parameter that the failure path ignores is a
-  # parameter that lies.
-  #
-  # Calls half_wired directly, so it MUST be invoked in the current shell.
-  echo
-  echo "READ-BACK"
-
   # THREE STATES, not two. A board write is not read-your-writes consistent,
   # so "the listing does not show it" means one of: not yet visible, did not
   # land, or the read did not answer. They call for different operator
@@ -1498,6 +1666,27 @@ read_back() {
   else
     echo "  board position     ok (after #$AFTER)"
   fi
+}
+
+read_back() {
+  # Compares every relationship against the four answers.
+  #
+  # Takes NO arguments, and reads the globals $NUM and $URL, for the same
+  # reason board_half does: its failure path falls through to half_wired_head,
+  # which prints the globals. A parameter that the failure path ignores is a
+  # parameter that lies.
+  #
+  # Calls half_wired directly, so it MUST be invoked in the current shell.
+  echo
+  echo "READ-BACK"
+
+  if [ "$CLOUD" -eq 1 ]; then
+    # Nothing was read, so nothing is "ok": say what was not checked.
+    echo "  board membership   not checked (cloud mode)"
+    echo "  board position     not checked (cloud mode)"
+  else
+    read_back_board
+  fi
 
   # Three REST reads (#14 KTD6): the issue, for its parent, and its two
   # dependency lists. EACH REPLY'S SHAPE IS CHECKED, because emptiness alone
@@ -1544,6 +1733,18 @@ read_back() {
   [ "$BLOCKING_READ" = "$BLOCKING_WANT" ] \
     || half_wired "blocks — asked for #$NUM to block [${BLOCKING_WANT:-none}]; it reads back blocking [${BLOCKING_READ:-none}]"
   echo "  blocks             ok (${BLOCKING_WANT:-none})"
+
+  # The board-pending label is what keeps a cloud filing from being lost, so a
+  # cloud run is not done until it reads back present (#14 R12). It comes from
+  # the same issue reply as the parent; no extra read.
+  if [ "$CLOUD" -eq 1 ]; then
+    LABEL_READ="$(issue_reply_label "$REL_JSON" "$BOARD_PENDING_LABEL")"
+    [ "$LABEL_READ" != "BAD" ] \
+      || half_wired_unreadable "the labels of #$NUM came back in an unrecognised shape — the issue reply carries no labels list"
+    [ "$LABEL_READ" = "present" ] \
+      || half_wired "$BOARD_PENDING_LABEL label — asked for, because cloud mode did not place #$NUM on the board; it reads back absent"
+    printf '  %-19s%s\n' "$BOARD_PENDING_LABEL" "ok (present)"
+  fi
 }
 # <<< SHARED READ-BACK END
 
@@ -1619,9 +1820,78 @@ slot shown in the pre-write summary immediately before the move."
   fi
 fi
 
+# CLEAR THE BOARD-PENDING LABEL (#14 R15, R16). A cloud run labelled this
+# issue because it could not place it; this local adopt has just placed it and
+# read the position back, so the label's reason is gone. Only reachable once
+# read_back returned, and skipped when the position was NOT SET, because then
+# the issue is still unplaced.
+#
+# Best effort and loud, like the move record above: the placement is verified
+# and stands, so a failure here must not call die or any half_wired_*, whose
+# advice would be wrong on a correctly placed issue. The removal is read back
+# with a fresh read, because the read-back's issue reply predates it.
+if [ "$MODE" = adopt ] && [ "$CLOUD" -eq 0 ] && [ "$POSITION_DEGRADED" -eq 0 ] \
+   && [ "$FOUND_LABEL" = present ]; then
+  UNLABEL_RC=0
+  gh_api -X DELETE "repos/$REPO/issues/$NUM/labels/$BOARD_PENDING_LABEL" >/dev/null \
+    || UNLABEL_RC=$?
+  UNLABEL_ERR="$(gh_api_err)"
+  # Read it whatever the DELETE's exit: a call can fail after the server
+  # applied it, and the fresh read, not the exit code, says what landed.
+  LABEL_AFTER_REMOVAL="$(issue_reply_label "$(gh_api "repos/$REPO/issues/$NUM")" "$BOARD_PENDING_LABEL")"
+  if [ "$LABEL_AFTER_REMOVAL" = absent ]; then
+    printf '  %-19s%s\n' "$BOARD_PENDING_LABEL" "removed"
+  elif [ "$LABEL_AFTER_REMOVAL" = BAD ]; then
+    # COULD NOT LOOK, never "still there": offering a second DELETE here
+    # could remove a label that was added back since.
+    echo "########################################################################" >&2
+    echo "## WARNING: #$NUM is PLACED, but whether its $BOARD_PENDING_LABEL label is gone is UNKNOWN" >&2
+    echo "########################################################################" >&2
+    echo "#$NUM is correctly wired and every relationship read back matching."   >&2
+    echo "Nothing is half-wired and there is nothing here to undo. The label"     >&2
+    echo "DELETE exited $UNLABEL_RC${UNLABEL_ERR:+ ($UNLABEL_ERR)}, and the read that would" >&2
+    echo "confirm it did not come back as an issue. Check it by hand:"            >&2
+    echo "  gh api repos/$REPO/issues/$NUM --jq '[.labels[].name]'"              >&2
+    echo "########################################################################" >&2
+  else
+    echo "########################################################################" >&2
+    echo "## WARNING: #$NUM is PLACED but its $BOARD_PENDING_LABEL label was NOT removed" >&2
+    echo "########################################################################" >&2
+    echo "#$NUM is correctly wired and every relationship read back matching."   >&2
+    echo "Nothing is half-wired and there is nothing here to undo. Only the label" >&2
+    echo "is left, still saying the issue needs placing."                         >&2
+    if [ "$UNLABEL_RC" -ne 0 ]; then
+      echo "  the label DELETE exited $UNLABEL_RC: ${UNLABEL_ERR:-(no output)}"   >&2
+    else
+      echo "  the label DELETE returned ok, but a fresh read of #$NUM did not show it gone" >&2
+    fi
+    echo "REMOVE IT BY HAND:"                                                     >&2
+    echo "  gh api -X DELETE repos/$REPO/issues/$NUM/labels/$BOARD_PENDING_LABEL" >&2
+    echo "########################################################################" >&2
+  fi
+fi
+
 echo
 DONE_VERB="$( [ "$MODE" = adopt ] && echo wired || echo created )"
-if [ "$POSITION_DEGRADED" -eq 0 ]; then
+if [ "$CLOUD" -eq 1 ]; then
+  # Never "not on the board": a board can auto-add sub-issues at its bottom,
+  # and an adopted issue may already be placed. The run says only what it
+  # knows -- it did not look (#14 R14).
+  echo "#$NUM is $DONE_VERB and every relationship read back matching, but the board was not checked from the cloud. It may already be on it, at a spot nobody chose (sub-issues can be added to the bottom automatically). It carries the $BOARD_PENDING_LABEL label. $URL"
+  # Loud, and still exit 0, like the NOT SET notice below: everything a cloud
+  # session can write landed and read back. Placing it needs the board, so
+  # the command is for a local session; its position is the one answer left.
+  echo "########################################################################" >&2
+  echo "## BOARD NOT CHECKED                                                   #" >&2
+  echo "########################################################################" >&2
+  echo "Cloud mode does not read or write the board, so nothing has checked" >&2
+  echo "where #$NUM sits on it, or whether it is there at all. It carries the" >&2
+  echo "$BOARD_PENDING_LABEL label so it can be found. Place it from a local session," >&2
+  echo "choosing --after <N> or --top there; the adopt run writes only what is" >&2
+  echo "missing, reads everything back, and removes the label:" >&2
+  reverify_command "(--after N | --top)" >&2
+  echo "########################################################################" >&2
+elif [ "$POSITION_DEGRADED" -eq 0 ]; then
   echo "#$NUM is $DONE_VERB and every relationship read back matching. $URL"
 else
   echo "#$NUM is $DONE_VERB and every relationship read back matching, but its board position is NOT SET. $URL"

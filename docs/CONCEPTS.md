@@ -114,9 +114,17 @@ Three things about this tool's behavior come from your config file rather than b
 
 Every other guard on this page holds identically no matter what your config says. These three are the only places where "it depends on your repo" is a true statement about this tool's behavior.
 
+### Cloud Mode Files Without the Board, and Says So
+
+A Claude Code cloud session's GitHub proxy refuses the project board entirely. Nothing there can read the board, add to it, or place on it. So in such a session the tool runs in cloud mode: it does everything the cloud allows, reads all of it back, and says the board was not checked instead of pretending. It never says the issue is off the board: a board can add sub-issues to its bottom automatically, and an adopted issue may already be placed.
+
+Cloud mode turns on from the session's own environment (`CLAUDE_CODE_REMOTE=true`), or from the `--no-board` flag once the board read is refused with the cloud proxy's own message ("sessions are bound to their configured repositories"). A board that reads fine refuses `--no-board`, and any other failed board read stops the run. That matters because "the board listing is not trustworthy" is a hard stop for a reason: in a local session it can mean a truncated listing that would hide a duplicate. A flag honoured in any session, or a failure that switched modes, would turn that stop into a quiet way to file off the board.
+
+The position is the one placement answer cloud mode can't give honestly, because it can't see the board. So it takes `--position-later` and refuses `--after` and `--top`. In their place it labels the issue `needs-board`, and the run isn't done until that label reads back present. A local adopt that places the issue later removes the label once the placement reads back. If the removal fails, the placement stands and a warning names the command that finishes it.
+
 ### Board Position Degrades Instead of Failing
 
-Every call this tool makes goes over GitHub's REST API, except one: setting an issue's board position. GitHub has no REST route for that, so it uses GraphQL. Some sessions, including Claude Code cloud sessions, refuse GraphQL calls.
+Every call this tool makes goes over GitHub's REST API, except one: setting an issue's board position. GitHub has no REST route for that, so it uses GraphQL. Some sessions reach the board over REST but refuse GraphQL calls. (A Claude Code cloud session is refused the board itself, so it uses cloud mode, above.)
 
 When GitHub refuses the position write with HTTP 403, the tool does not call the issue half-wired. The issue exists, it is on the board, and every other relationship read back matching. Only its position is wrong. So the run exits 0, the read-back says `board position NOT SET`, and a loud notice prints the adopt command that places it from a session where GraphQL works. That command is safe on a correctly wired issue: it writes only what is missing and reads everything back.
 
