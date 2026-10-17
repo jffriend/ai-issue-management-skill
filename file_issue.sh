@@ -1,42 +1,5 @@
 #!/bin/bash
-# scripts/file_issue.sh — the only supported way to put an issue on the board,
-# whether it is created here or already exists and is being wired.
-#
-# WHY THIS REFUSES INSTEAD OF REMINDING
-# ------------------------------------
-# docs/WORKFLOW.md § "Recording an ordering constraint" already says an order
-# between two pieces of work must be recorded as a blocker in the same change
-# that writes the issue. On 2026-08-19 that rule was broken three times in one
-# day, by sessions that had read it in the same sitting. The 2026-08-19 ordering
-# audit found 16 stated constraints with no blocker link — including the iCloud
-# wipe (#138) sitting 40 positions ahead of the work establishing that 329
-# photos exist only in iCloud, which the § 7 query would have offered as ready
-# to start.
-#
-# So the four placement questions are flags, all four REQUIRED, each with an
-# explicit way to say "none". A missing one is an error naming the flag. There
-# is no default, because a default is what gets taken silently. Adopt mode asks
-# exactly the same four.
-#
-# Separately: a truncated board listing hid #164 well enough that a session
-# filed #176 as a duplicate of it. So this prints the board neighbourhood and
-# any near-duplicate titles, stops before writing when there are any, and treats a truncated
-# board as fatal rather than as a short board.
-#
-# And nothing here reports success from an exit code. Every relationship is
-# applied and then READ BACK, by ONE shared read-back that both modes call. A
-# mismatch names the relationship and says what state the issue was left in, so
-# it can be finished by hand.
-#
-# The board half of that read-back resolves THREE states, not two. A write to
-# project 2 is not read-your-writes consistent, so a listing that does not show
-# the issue may mean the write has not propagated, that it did not land, or
-# that the read did not answer. Reading it as one state declared four correctly
-# wired filings HALF-WIRED and told the operator to delete them. So the READ is
-# retried on a finite bound (never the write), and each of the three states
-# refuses in its own words with a next action that is safe on a correctly wired
-# issue.
-#
+# The only supported way to put an issue on the board, whether created here or already existing.
 # >>> HELP BLOCK START
 # USAGE — two modes. Both answer the same four placement questions. Both
 # require --config, naming the JSON file that supplies this board's repo,
@@ -135,99 +98,18 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NEIGHBOURS=3
-# REPO, OWNER, PROJECT_NUMBER, PROJECT_ID, the shape/label vocabulary, the
-# plan-derived path (PLAN_DIR) and whether a Design: line is required at all
-# (DESIGN_LINE_REQUIRED) are no longer hardcoded here. They are read from the
-# JSON file named by --config, once the argument parser below has run --
-# see "Load and validate --config" further down, and config.example.json.
 
-# READ-BACK RETRY BOUND (KD1: retry the READ, never the write).
-#
-# A write to project 2 is not read-your-writes consistent. Four correctly
-# wired filings were declared HALF-WIRED because the board listing was read
-# before it had caught up, and the refusal told the operator to delete the
-# issue. So the read-back re-reads on a finite, growing wait.
-#
-# HARD CEILING: the total wall-clock wait for ONE read-back must never exceed
-# 30 SECONDS. With the defaults below the waits are 1 + 2 + 4 + 8 = 15s across
-# 5 attempts, provably under the ceiling. Anything raising either default must
-# re-check that sum against it.
-#
-# MEASURED 2026-08-24, against the live board (154 items, 2 pages), gh 2.98.0.
-# Seven real filings and adoptions were made that day. SIX of the seven had a
-# read-back that was clean on the FIRST attempt — the race did not fire once
-# naturally, in a session that also filed several within seconds of each
-# other. So there is no observed natural convergence time to calibrate to,
-# and these numbers are NOT calibrated to one. State that plainly rather than
-# implying a measurement that was not taken.
-#
-# What WAS measured: the retry path itself, exercised against genuine GitHub
-# responses by dropping the new issue's row from the first board read only
-# (the injection R16 permits). It converged on attempt 2 after a 1-second
-# wait, and reported `board read ok on attempt 2 of 5`. Against the pre-U3
-# script that same condition produced the false HALF-WIRED alarm, complete
-# with the delete-and-re-run remedy.
-#
-# The bound below is therefore set from the CEILING, not from a convergence
-# curve: as many attempts as fit comfortably under 30 seconds. If a refusal
-# ever reports success on the final attempt, the warning it prints is the
-# signal to come back and re-measure — by then there will be a real curve.
-#
-# UNRESOLVED, and recorded rather than guessed: whether the underlying cause
-# is Projects replication lag or a listing read torn across the two pages
-# while a write lands. The race never fired naturally here, so nothing
-# distinguished them. A bounded retry mitigates both.
-#
-# THIS IS THE COMING BACK (#265, 2026-08-25). Filing #264 succeeded on
-# attempt 5 of 5 at 15s cumulative wait — the FIRST time the signal above
-# fired for real. That places real convergence somewhere in (7s, 15s], the
-# first actual data point since this file was written. It is one filing, not
-# a curve, so this is a minimal fix to the warning the signal exposed, not
-# the full measurement campaign that would build one — that campaign is
-# deliberately deferred rather than run here.
-#
-# THE WARNING BUG THAT FIRED: the old text told the operator to "raise
-# FILE_ISSUE_READBACK_ATTEMPTS / _DELAY", but raising ATTEMPTS alone almost
-# always overshoots the ceiling below — the wait DOUBLES each attempt, so
-# ATTEMPTS=6 at the current DELAY needs 31s, one second over. DELAY is the
-# lever with headroom: it scales the SAME doubling series linearly, at the
-# SAME attempt count. The warning below now computes, from the live
-# ATTEMPTS, the highest DELAY the ceiling still accepts, and names that —
-# never a knob the check two screens down will refuse.
-#
-# THE DELAY=0 QUESTION, decided rather than left open: DELAY=0 keeps passing
-# the ceiling check at any ATTEMPTS, because the doubling sum of zero is
-# always zero — it was flagged as a loophole that "adds attempts but no
-# wall-clock tolerance". It stays allowed, deliberately: the ceiling exists
-# to bound real wall-clock hang risk, and a wait that is always zero cannot
-# create that risk regardless of ATTEMPTS. It is also load-bearing —
-# tests/test_engine_gating.py runs the retry path at DELAY=0 to stay
-# fast and deterministic. What DELAY=0 does NOT do is buy extra retries with
-# real tolerance; an operator chasing more real wall-clock budget still
-# needs a non-zero DELAY, per the warning above.
+# Retry the read-back's READ, never the write, within 30 SECONDS; the bound is not calibrated to measured lag.
 READBACK_ATTEMPTS="${FILE_ISSUE_READBACK_ATTEMPTS:-5}"
 READBACK_DELAY="${FILE_ISSUE_READBACK_DELAY:-1}"
-READBACK_WAITED=0   # seconds actually spent waiting, reported in every refusal
+READBACK_WAITED=0
 
 CONFIG=""
 TITLE=""
 BODY_FILE=""
 SHAPE=""
 ADOPT=""
-# THE MOVE RECORD (adopt mode only), latched where the pre-write summary
-# decides it. Adopt does not refuse a reposition — it MOVES the issue — and
-# until this existed the slot it moved FROM was recorded nowhere, so a real
-# prior priority decision vanished the moment it was overwritten. These three
-# carry that slot from the POSITION_LINE block, which already computes it for
-# the screen, down to the comment written after the read-back proves the move
-# landed. They are NEVER recomputed: one branch decides, so the screen and the
-# comment cannot disagree.
-#
-# They are defaulted HERE, beside the other argument defaults, because create
-# mode never runs the block that latches them and this script runs under
-# `set -u`. An adopt of an issue that is not yet on the board leaves them at
-# these defaults too — there is no origin slot to name, so there is nothing to
-# record.
+# Adopt's move record, latched once by the POSITION_LINE block; defaulted here because create mode never sets it (set -u).
 ADOPT_MOVED=0
 ADOPT_FROM_IDX=""
 ADOPT_FROM_PREV=""
@@ -242,36 +124,19 @@ BLOCKS=""
 BLOCKS_SET=0
 DRY_RUN=0
 FILE_ANYWAY=0
-# CLOUD MODE (#14). A Claude Code cloud session's GitHub proxy refuses the
-# user-owned board -- every users/{owner}/projectsV2/... path, not only
-# GraphQL (measured 2026-10-16). So a run there cannot read the board, add to
-# it or place on it. Cloud mode skips the board entirely, takes the position
-# answer as "decided later", and labels the issue BOARD_PENDING_LABEL so a
-# local session can find it and place it.
-#
-# It is turned on by the session's own environment, or by --no-board once the
-# board read is refused with the cloud proxy's own message (CLOUD_PROXY_REFUSAL).
-# Never by any other failed board read: a local token without board access
-# must still stop at "the board listing is not trustworthy" rather than
-# quietly file off the board (docs/solutions/best-practices/the-exemption-
-# that-makes-a-guard-writable-is-the-hole.md). And never by --no-board alone:
-# a flag honoured in any session would be exactly that exemption, so a board
-# that reads fine refuses it (#14 R2).
+# Cloud mode skips the board the proxy refuses. Only CLAUDE_CODE_REMOTE, or --no-board plus a proxy refusal, enables it.
 NO_BOARD=0
 POSITION_LATER=0
 CLOUD=0
 CLOUD_REASON=""
-CLOUD_UNCONFIRMED=0   # --no-board without the environment: proven at the board read
+CLOUD_UNCONFIRMED=0
 CLOUD_PROXY_REFUSAL="sessions are bound to their configured repositories"
 BOARD_PENDING_LABEL="needs-board"
-FOUND_LABEL=""   # adopt: whether the issue already carries BOARD_PENDING_LABEL
+FOUND_LABEL=""
 
 die() { printf '%s\n' "$*" >&2; exit 1; }
 
-# A bound of zero attempts is a read-back that never reads, which would be a
-# vacuous pass in the one guard this script is. Refuse it rather than accept
-# it. A delay of zero is legitimate — the test suite uses it — but an attempt
-# count of zero, or either value non-numeric, is not.
+# Zero attempts would make the read-back pass vacuously; a zero delay is legitimate (tests use it).
 case "$READBACK_ATTEMPTS" in
   ''|*[!0-9]*) die "ERROR: FILE_ISSUE_READBACK_ATTEMPTS must be a whole number of attempts (got: $READBACK_ATTEMPTS)." ;;
 esac
@@ -280,14 +145,7 @@ case "$READBACK_DELAY" in
   ''|*[!0-9]*) die "ERROR: FILE_ISSUE_READBACK_DELAY must be a whole number of seconds (got: $READBACK_DELAY)." ;;
 esac
 
-# THE CEILING IS ENFORCED, not merely stated. Validating only the FORMAT of the
-# two variables let `FILE_ISSUE_READBACK_ATTEMPTS=50 FILE_ISSUE_READBACK_DELAY=10`
-# through — a worst case of well over an hour, contradicting the 30-second
-# ceiling this file states a few lines above. It cannot make the guard pass, but
-# it can hang a session for as long as it likes, and a ceiling that nothing
-# checks is a comment, not a bound. The sum below is the same doubling series
-# the retry loop walks: delay + 2*delay + ... across ATTEMPTS-1 waits. It stops
-# adding as soon as it is over, so an absurd attempt count cannot overflow.
+# Enforce the 30s ceiling: sum the doubling waits, stopping once over so a huge count cannot overflow.
 READBACK_CEILING=30
 READBACK_WORST_CASE=0
 readback_d="$READBACK_DELAY"
@@ -308,8 +166,6 @@ if [ "$READBACK_WORST_CASE" -gt "$READBACK_CEILING" ]; then
 fi
 
 usage() {
-  # Delimited, never a line range. A fixed range silently ran past the header
-  # once the header grew, and printed shell code as help.
   awk '/^# >>> HELP BLOCK START$/ {inblock=1; next}
        /^# <<< HELP BLOCK END$/   {inblock=0}
        inblock' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -343,9 +199,7 @@ if [ "${CLAUDE_CODE_REMOTE:-}" = "true" ]; then
   CLOUD_REASON="CLAUDE_CODE_REMOTE=true"
 fi
 if [ "$NO_BOARD" -eq 1 ]; then
-  # The position answers are checked as cloud-mode answers from here, offline.
-  # Without the environment, the board read below must still prove the board
-  # is refused by the cloud proxy before anything is written.
+  # Position answers are checked offline as cloud-mode; without the env var, the board read must prove the proxy refusal.
   [ "$CLOUD" -eq 1 ] || CLOUD_UNCONFIRMED=1
   CLOUD=1
   CLOUD_REASON="${CLOUD_REASON:+$CLOUD_REASON and }--no-board"
@@ -354,14 +208,7 @@ fi
 if [ -n "$ADOPT" ]; then MODE=adopt; else MODE=create; fi
 if [ "$MODE" = adopt ]; then NOTHING="Nothing was changed."; else NOTHING="Nothing was created."; fi
 
-# ---------------------------------------------------------------------------
-# Load and validate --config. Everything the header used to hardcode --
-# REPO, OWNER, PROJECT_NUMBER, PROJECT_ID, the shape/label vocabulary, the
-# plan-derived path, and whether a Design: line is required at all -- comes
-# from this one JSON file, read once, here, before any network call. A
-# missing or malformed field fails now, offline, naming the field, rather
-# than surfacing as a confusing GraphQL error deep inside a write.
-# ---------------------------------------------------------------------------
+# Load and validate --config before any network call, so a bad field fails offline and is named.
 
 [ -n "$CONFIG" ] || die "ERROR: --config is required, naming the JSON config file for
        this board (repo, owner, project number, shapes/labels, plan-derived
@@ -377,10 +224,7 @@ PROJECT_ID="$(jq -r '.project_id // empty' "$CONFIG")"
 PLAN_DIR="$(jq -r '.plan_dir // empty' "$CONFIG")"
 FILE_ISSUE_CMD="$(jq -r '.file_issue_cmd // empty' "$CONFIG")"
 DESIGN_LINE_REQUIRED="$(jq -r 'if (.design_line_required // false) then "true" else "false" end' "$CONFIG")"
-# human_review_required is a JSON boolean, missing meaning true. The engine
-# only validates it; the skill reads it to decide whether a human previews
-# first. Check the TYPE: jq's `//` treats false as absent, and a string "true"
-# would pass a value check.
+# Check the type: jq's // treats false as absent, and a string "true" would pass a value check.
 HUMAN_REVIEW_TYPE="$(jq -r 'if has("human_review_required") then (.human_review_required | type) else "boolean" end' "$CONFIG")"
 
 [ -n "$REPO" ] || die "ERROR: config $CONFIG is missing required field: repo"
@@ -409,13 +253,7 @@ BAD_SHAPE="$(jq -r '(.shapes // [])[] | select((.labels // []) | length == 0) | 
        defined. Every shape needs at least one label."
 SHAPE_NAMES="$(jq -r '[(.shapes // [])[].name] | join(", ")' "$CONFIG")"
 
-# ---------------------------------------------------------------------------
-# The OFFLINE stage of the gate. Nothing in this block touches the network.
-#
-# Adopt mode's gate runs in TWO stages: this one, and a post-fetch stage after
-# the issue is read but still before any write. The parenting rule needs the
-# issue body, and for an existing issue the body only arrives over the network.
-# ---------------------------------------------------------------------------
+# Offline gate; adopt's post-fetch stage runs later because the parenting rule needs the fetched body.
 
 if [ "$MODE" = adopt ]; then
   for pair in "--title:$TITLE" "--body-file:$BODY_FILE" "--shape:$SHAPE"; do
@@ -439,8 +277,6 @@ else
 
   SHAPE_LABELS="$(jq -r --arg s "$SHAPE" '(.shapes // [])[] | select(.name == $s) | .labels[]' "$CONFIG")"
   [ -n "$SHAPE_LABELS" ] || die "ERROR: --shape must be one of: $SHAPE_NAMES (got: $SHAPE). Nothing was created."
-  # The create is `gh api -X POST repos/{repo}/issues`, which takes labels as
-  # an array field: one `labels[]=` per label.
   LABEL_FIELDS=()
   while IFS= read -r lbl; do
     [ -n "$lbl" ] && LABEL_FIELDS+=(-f "labels[]=$lbl")
@@ -456,21 +292,14 @@ if [ -z "$PARENT" ] && [ "$NO_PARENT" -eq 0 ]; then
   die "ERROR: no parent answer. Pass --parent <N> or --no-parent.
        Every issue answers this. There is no default."
 fi
-# --parent is an ISSUE NUMBER, and it is digit-validated here for the same
-# reason --adopt is. A typo that survives the offline gate is not caught until
-# the read-back, and by then a REAL issue exists whose parent never landed —
-# so the operator is handed the create-mode remedy, "delete #N and re-run", for
-# a mistake that cost nothing to catch before anything was written.
+# Digit-validate --parent now: a typo caught only at read-back leaves a real issue with no parent.
 if [ -n "$PARENT" ]; then
   case "$PARENT" in
     *[!0-9]*) die "ERROR: --parent takes an issue number (got: $PARENT). $NOTHING" ;;
   esac
 fi
 
-# The position answer depends on the mode (#14 R5-R7). Cloud mode cannot see
-# the board, so a position named there would be a blind guess that nothing
-# checks: it takes --position-later instead, and refuses --after and --top.
-# A local run can see the board, so it may not defer.
+# Cloud mode can't see the board, so it takes --position-later and refuses --after/--top (#14 R5-R7).
 if [ "$CLOUD" -eq 1 ]; then
   if [ -n "$AFTER" ] || [ "$TOP" -eq 1 ]; then
     die "ERROR: cloud mode ($CLOUD_REASON) cannot see the board, so it cannot check
@@ -493,13 +322,7 @@ else
        lands wherever the board put it, which is not a priority decision."
   fi
 fi
-# --after is an ISSUE NUMBER too, and it is validated for a second reason on
-# top of the typo one: the board lookups that use it are grep matches, and an
-# unvalidated value is a REGEX. `printf '101\n144\n107\n' | grep -qx '1.4'`
-# succeeds, so `--after 1.4` used to pass the "is it on the board" gate, the
-# issue was created, and the lookup of a non-number then failed
-# and left the run reporting HALF-WIRED with the delete remedy. Both halves are
-# fixed: digits only here, and -F (fixed string) on every board lookup below.
+# --after must be digits: board lookups use grep, where an unchecked value is a regex (`1.4` matches `144`).
 if [ -n "$AFTER" ]; then
   case "$AFTER" in
     *[!0-9]*) die "ERROR: --after takes an issue number (got: $AFTER). $NOTHING" ;;
@@ -519,23 +342,11 @@ if [ "$BLOCKS_SET" -eq 0 ]; then
 fi
 
 parse_list() {
-  # "none" (any case) or empty means the empty set.
   local raw="$1" n
   case "$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')" in
     none|"") return 0 ;;
   esac
-  # Note the trailing newline: `read` drops a final line that has none, and a
-  # silently dropped blocker is the exact failure this whole script exists to
-  # stop.
-  # `sort -n -u` is not cosmetic. `--blocked-by 122,122` used to make the
-  # WANTED set "122,122" while the server — which cannot hold the same link
-  # twice — correctly read back "122". A CORRECTLY WIRED issue then failed its
-  # own read-back and, in create mode, was told to delete itself. The same
-  # repeat would also have written the link twice, and a second write of an
-  # already-present link is refused (it failed the whole `gh issue edit
-  # --add-blocked-by 122,122` call this script used to make). De-duplicating HERE
-  # fixes the write side and the compare side together, which is the only way
-  # the two stay in agreement.
+  # Trailing newline: read drops an unterminated last line. sort -nu dedupes to match what the server reads back.
   printf '%s\n' "$raw" | tr ',' '\n' | while read -r n; do
     n="$(printf '%s' "$n" | tr -d '[:space:]#')"
     [ -n "$n" ] || continue
@@ -551,15 +362,9 @@ BLOCKS_LIST="$(parse_list "$BLOCKS")"
 case "$BLOCKED_LIST" in *BAD*) die "ERROR: --blocked-by takes issue numbers or the word none (got: $BLOCKED_BY)." ;; esac
 case "$BLOCKS_LIST" in *BAD*) die "ERROR: --blocks takes issue numbers or the word none (got: $BLOCKS)." ;; esac
 
-# The parenting rule. Decided by the repo owner: a parent is REQUIRED when the
-# issue is plan-derived, and a judgement call otherwise. Plan-derived is read
-# mechanically off the body's `Design:` field. On the create path the body is
-# already on disk; on the adopt path it arrives with the post-fetch stage, and
-# this same function is applied to it there.
+# A parent is required when the body's Design: field marks it plan-derived; adopt applies this to the fetched body.
 parenting_rule() {
   local body_file="$1" design_line
-  # Whether this rule applies AT ALL is itself config-driven -- Pluckd's
-  # config has no Design-line requirement unless it adds one.
   [ "$DESIGN_LINE_REQUIRED" = "true" ] || return 0
   if python3 "$SCRIPT_DIR/issue_text.py" plan-derived --config "$CONFIG" "$body_file"; then
     if [ "$NO_PARENT" -eq 1 ]; then
@@ -577,21 +382,9 @@ parenting_rule() {
 
 [ "$MODE" = create ] && parenting_rule "$BODY_FILE"
 
-# ---------------------------------------------------------------------------
-# The capability probe. Issue #14 moves every GitHub call this script makes to
-# `gh api` REST paths, leaving the board-position write as its one GraphQL
-# call, and the `gh api` features it uses are old enough to need no version
-# check. So the probe asks one thing: is gh on PATH. It used to read `gh issue create/edit --help` and
-# `gh issue view --json` for native relationship flags and fields, which the
-# REST paths do not use.
-#
-# The version is READ and PRINTED for the record, and never decides. An
-# unreadable version string prints the sentinel `unknown` and the run
-# proceeds.
-# ---------------------------------------------------------------------------
+# Capability probe: only gh on PATH is checked; its version is printed for the record and never decides.
 
 gh_version_fact() {
-  # The installed version, or the sentinel `unknown`. Never a refusal.
   local line v
   line="$(gh --version 2>/dev/null | head -1)"
   case "$line" in
@@ -621,11 +414,7 @@ if [ "$CLOUD" -eq 1 ] && [ "$CLOUD_UNCONFIRMED" -eq 0 ]; then
 fi
 probe_gh_capability
 
-# ---------------------------------------------------------------------------
-# From here on calls go to the network. Everything down to the --dry-run exit
-# and the possible-duplicates stop is still READ-ONLY: nothing creates or
-# changes anything before them.
-# ---------------------------------------------------------------------------
+# Network from here; everything up to the --dry-run exit and the duplicates stop is read-only.
 
 BOARD_JSON="$(mktemp -t file_issue_board.XXXXXX)"
 BOARD_ERR="$(mktemp -t file_issue_boarderr.XXXXXX)"
@@ -633,25 +422,17 @@ GH_API_ERR="$(mktemp -t file_issue_ghapierr.XXXXXX)"
 cleanup() { rm -f "$BOARD_JSON" "$BOARD_ERR" "$GH_API_ERR" "${BOARD_JSON}.2" "${TITLES_JSON:-}" "${ADOPT_BODY:-}" ; }
 trap cleanup EXIT
 
-# REST helpers. gh_api runs `gh api` with its arguments, passes stdout through
-# and keeps stderr in $GH_API_ERR, so a caller can tell WHY a call failed:
-# gh_api_failed_with reads gh's own "(HTTP NNN)" suffix from it, and a failure
-# that does not carry that status is never read as it. gh's message never
-# reaches the terminal, so a caller that reports a failure prints gh_api_err.
+# gh_api keeps stderr in $GH_API_ERR; gh_api_failed_with matches only gh's "(HTTP NNN)" suffix.
 gh_api() { gh api "$@" 2>"$GH_API_ERR"; }
 gh_api_failed_with() { grep -qF "(HTTP $1)" "$GH_API_ERR"; }
 gh_api_err() { tr '\n' ' ' <"$GH_API_ERR"; }
 
 board_untrusted() {
-  # Why a failed board read stops the run. $BOARD_ERR holds board.sh's stderr.
   printf 'ERROR: the board listing is not trustworthy — %s\n' "$(tr '\n' ' ' <"$BOARD_ERR")" >&2
   printf 'A truncated board reads exactly like a short one. Refusing to go on.\n' >&2
 }
 
-# --no-board without the environment signal (#14 R2). One board read decides:
-# refused with the cloud proxy's message, this is a cloud session and cloud
-# mode stands; readable, this session can see the board, so --no-board is
-# refused; failed any other way, the run stops exactly as a local run does.
+# --no-board without the env var (#14 R2): a proxy refusal confirms cloud mode, a readable board refuses the flag.
 if [ "$CLOUD_UNCONFIRMED" -eq 1 ]; then
   if bash "$SCRIPT_DIR/board.sh" --config "$CONFIG" "$BOARD_JSON" 2>"$BOARD_ERR"; then
     die "REFUSED: --no-board is for a session whose board read is refused by the
@@ -659,8 +440,7 @@ if [ "$CLOUD_UNCONFIRMED" -eq 1 ]; then
        the position against it: drop --no-board and --position-later and pass
        --after <N> or --top. $NOTHING"
   fi
-  # Both the proxy's phrase and gh's 403 suffix, so no other failure whose
-  # text happens to quote the phrase can pass for the refusal.
+  # Require both the proxy's phrase and gh's 403 suffix, so another failure quoting the phrase can't pass.
   if ! grep -qF "$CLOUD_PROXY_REFUSAL" "$BOARD_ERR" \
      || ! grep -qF "(HTTP 403)" "$BOARD_ERR"; then
     board_untrusted
@@ -671,11 +451,7 @@ if [ "$CLOUD_UNCONFIRMED" -eq 1 ]; then
 fi
 
 issue_numeric_id() {
-  # $1 an issue number. Prints the issue's numeric REST `id` -- what the
-  # sub-issue, dependency and project-item endpoints take, never the number.
-  # Returns 0 found, 2 the issue does not exist (HTTP 404), 1 could not read:
-  # any other failure, or a reply with no numeric id. Unable to look is not
-  # "does not exist"; only a 404 says that.
+  # Prints the issue's REST id; returns 0 found, 2 on HTTP 404, 1 unreadable (only a 404 means it doesn't exist).
   local reply id
   reply="$(gh_api "repos/$REPO/issues/$1")" || { gh_api_failed_with 404 && return 2; return 1; }
   id="$(printf '%s\n' "$reply" \
@@ -684,29 +460,18 @@ issue_numeric_id() {
   printf '%s\n' "$id"
 }
 
-# The comparison form of an answer set: sorted, DE-DUPLICATED, comma-joined.
-# The -u matches parse_list's, because the read-back compares this against what
-# the server holds and the server never holds a link twice.
+# Sorted, de-duplicated, comma-joined; -u matches parse_list since the server never holds a link twice.
 norm() { printf '%s' "$1" | tr ' ' '\n' | sed '/^$/d' | sort -nu | paste -sd, - ; }
 csv_of() { printf '%s' "$1" | tr '\n' ',' | sed 's/,$//'; }
 in_set() {
-  # in_set <needle> <space-separated haystack>
   local n="$1" h
   for h in $2; do [ "$h" = "$n" ] && return 0; done
   return 1
 }
 
-# REPLY PARSING. Adopt's pre-fetch and the shared read-back read the same
-# three REST replies -- the issue and its two dependency lists -- and both
-# parse them HERE, so one reply can never be read two ways. These only parse;
-# the read-back is still the one place a relationship is compared.
+# Adopt's pre-fetch and the read-back parse the same REST replies here, so a reply is never read two ways.
 issue_reply_parent() {
-  # $1 a `GET repos/{repo}/issues/{n}` reply its caller has already checked
-  # is an issue. Prints the parent's number, nothing for no parent, or BAD.
-  # The parent is the number at the end of `parent_issue_url`. GitHub OMITS
-  # the key on a parentless issue (measured 2026-10-15), so absent or null is
-  # "no parent". Anything else that is not a URL ending in a number is a
-  # reply this cannot read, never "no parent".
+  # Prints the parent number, nothing for no parent, or BAD; GitHub omits parent_issue_url when there is none.
   local out
   out="$(printf '%s' "$1" | jq -r '
     .parent_issue_url as $u
@@ -717,10 +482,7 @@ issue_reply_parent() {
 }
 
 issue_reply_label() {
-  # $1 a `GET repos/{repo}/issues/{n}` reply, $2 a label name. Prints present,
-  # absent, or BAD. Absent is a legal answer, so the reply must carry a
-  # `labels` ARRAY: a reply without one -- an error reply -- would otherwise
-  # read as "absent", which is exactly what a removed label reads as (#14 KTD6).
+  # Prints present, absent or BAD; requires a labels array, or an error reply would read as absent (#14 KTD6).
   local out
   out="$(printf '%s' "$1" | jq -r --arg l "$2" '
     if (.labels | type) == "array"
@@ -731,14 +493,7 @@ issue_reply_label() {
 }
 
 dependency_entries() {
-  # $1 a `.../dependencies/blocked_by` or `/blocking` reply. Prints one
-  # "number:id:owner/name" per linked issue, sorted by number, nothing for no
-  # links, or BAD. Empty is a legal answer, so the reply must be an ARRAY of
-  # issues carrying a number and an id: an object here -- an error reply --
-  # would otherwise read as "no links". The lists carry issues from OTHER
-  # repos too (measured 2026-10-15: this repo's #14 blocks
-  # jffriend/pluckd#577), so each entry keeps the repo its `repository_url`
-  # names.
+  # Prints number:id:owner/name per link, or BAD unless the reply is an array; links can point to other repos.
   local out
   [ -n "$1" ] || { printf 'BAD\n'; return 0; }
   out="$(printf '%s' "$1" | jq -r --arg repo "$REPO" '
@@ -750,28 +505,19 @@ dependency_entries() {
 }
 
 entry_numbers() {
-  # $1 dependency_entries output. Prints the issue numbers, space-separated.
   printf '%s\n' "$1" | sed '/^$/d' | cut -d: -f1 | tr '\n' ' ' | sed 's/ *$//'
 }
 
-# ---------------------------------------------------------------------------
-# Adopt: the POST-FETCH stage of the gate. Reads the issue, then refuses on a
-# closed issue, on the parenting rule, and on any relationship that contradicts
-# the answers given. Still before any write.
-# ---------------------------------------------------------------------------
 
 FOUND_PARENT=""
 FOUND_BLOCKED=""
 FOUND_BLOCKING=""
-FOUND_BLOCKED_PAIRS=""   # "number:id" per blocker, for the remedies
+FOUND_BLOCKED_PAIRS=""
 FOUND_BLOCKING_PAIRS=""
-SELF_ID=""               # the numeric REST id of the issue being wired
+SELF_ID=""
 
 if [ "$MODE" = adopt ]; then
-  # Three REST reads: the issue, and the two dependency lists. Each reply is
-  # checked for its SHAPE, not its emptiness, because empty is a legal answer
-  # for all three -- no parent, no blockers, blocks nothing -- and a reply of
-  # the wrong shape extracts as exactly that.
+  # Check each reply's shape, not emptiness: empty is legal for all three, and a wrong-shaped reply extracts as empty.
   ADOPT_JSON="$(gh_api "repos/$REPO/issues/$ADOPT")"
   if [ -z "$(printf '%s' "$ADOPT_JSON" | tr -d '[:space:]')" ] \
      || [ "$(printf '%s' "$ADOPT_JSON" | jq -r 'has("state") and has("number") and ((.id | type) == "number")' 2>/dev/null)" != "true" ]; then
@@ -779,7 +525,6 @@ if [ "$MODE" = adopt ]; then
        Check that the number exists and that 'gh auth status' is healthy.
        $NOTHING"
   fi
-  # The numeric id the sub-issue and dependency endpoints take for #$ADOPT.
   SELF_ID="$(printf '%s' "$ADOPT_JSON" | jq -r '.id')"
 
   ADOPT_STATE="$(printf '%s' "$ADOPT_JSON" | jq -r '.state // ""')"
@@ -798,14 +543,11 @@ if [ "$MODE" = adopt ]; then
   [ "$FOUND_PARENT" != "BAD" ] || die "ERROR: --adopt $ADOPT — the parent of #$ADOPT could not be read from $REPO.
        The reply's parent_issue_url is not an issue URL. $NOTHING"
 
-  # Whether it already carries the board-pending label: a cloud adopt adds it
-  # only when absent, a local placement removes it only when present (#14 KTD7).
+  # A cloud adopt adds the board-pending label only if absent; a local placement removes it only if present (#14 KTD7).
   FOUND_LABEL="$(issue_reply_label "$ADOPT_JSON" "$BOARD_PENDING_LABEL")"
   [ "$FOUND_LABEL" != "BAD" ] || die "ERROR: --adopt $ADOPT — the labels of #$ADOPT could not be read from $REPO.
        The reply carries no labels list. $NOTHING"
 
-  # The ids are kept beside the numbers, as "number:id:owner/name": the
-  # remedies below name them.
   for dep in blocked_by blocking; do
     dep_json="$(gh_api "repos/$REPO/issues/$ADOPT/dependencies/$dep?per_page=100")"
     dep_rc=$?
@@ -823,11 +565,7 @@ if [ "$MODE" = adopt ]; then
   ASKED_BLOCKED="$(printf '%s' "$BLOCKED_LIST" | tr '\n' ' ' | sed 's/ *$//')"
   ASKED_BLOCKING="$(printf '%s' "$BLOCKS_LIST" | tr '\n' ' ' | sed 's/ *$//')"
 
-  # KD2: refuse to reconcile. Silently overwriting a parent or a blocker is the
-  # failure this script exists to prevent, and it would be invisible
-  # afterwards. Every refusal names the command that clears it — a refusal the
-  # operator cannot clear sends them back to the ad hoc commands this tool
-  # replaces.
+  # KD2: refuse to reconcile, since overwriting a link would be invisible; each refusal names the command that clears it.
   if [ -n "$FOUND_PARENT" ] && [ "$FOUND_PARENT" != "$PARENT" ]; then
     die "ERROR: --adopt $ADOPT — the parent already there contradicts the answer given.
        $NOTHING
@@ -840,9 +578,7 @@ if [ "$MODE" = adopt ]; then
          gh api -X DELETE repos/$REPO/issues/$FOUND_PARENT/sub_issue -F sub_issue_id=$SELF_ID"
   fi
 
-  # Each remedy below is one REST delete per link, naming the numeric id the
-  # endpoint takes. A blocks link is the blocked issue's blocked-by link, so
-  # it is cleared against that issue, by #$ADOPT's own id.
+  # A blocks link is the blocked issue's blocked-by link, so it is cleared on that issue using #$ADOPT's id.
   UNASKED_BLOCKED=""
   CLEAR_BLOCKED=""
   for pair in $FOUND_BLOCKED_PAIRS; do
@@ -888,17 +624,9 @@ $CLEAR_BLOCKING"
   fi
 fi
 
-# ---------------------------------------------------------------------------
-# The neighbour check. Read-only; still creates and changes nothing.
-# ---------------------------------------------------------------------------
 
 read_board() {
-  # Ordered "<number>\t<title>\t<item node id>\t<item numeric id>" lines. The
-  # position write takes the node id; the single-item read the read-back
-  # corroborates with takes the numeric one. A truncated board is fatal,
-  # because a truncated board is exactly what hid #164. Only issues are rows:
-  # the GraphQL listing this replaced read pull requests and drafts as
-  # numberless, and the REST one gives a pull request a number.
+  # Prints number, title, item node id and item numeric id, tab-separated, for Issue rows only; a truncated board is fatal.
   local out="$1"
   if ! bash "$SCRIPT_DIR/board.sh" --config "$CONFIG" "$out" 2>"$BOARD_ERR"; then
     board_untrusted
@@ -910,8 +638,7 @@ read_board() {
 }
 
 if [ "$CLOUD" -eq 1 ]; then
-  # Cloud mode reads no board (#14 R10), so there is no listing to check
-  # --after against and no neighbourhood to show (R11).
+  # Cloud mode reads no board (#14 R10): nothing to check --after against, no neighbourhood to show (R11).
   BOARD_ROWS=""
   BOARD_NUMS=""
   echo "BOARD NEIGHBOURHOOD — not available in cloud mode (the board is not read)"
@@ -943,23 +670,16 @@ echo
 fi
 
 if [ "$MODE" = create ]; then
-  # The duplicate-title check answers a question that only arises for an issue
-  # that does not exist yet, so adopt mode skips it.
   TITLES_JSON="$(mktemp -t file_issue_titles.XXXXXX)"
   TITLES_LIMIT=500
-  # REST's open-issue listing, a page of 100 at a time, up to TITLES_LIMIT raw
-  # entries. The listing carries pull requests too, and a pull request is not
-  # an issue a new one could duplicate, so they are dropped below -- but only
-  # after counting, because they fill the same pages and a listing that hit
-  # the limit on them still left issues unread.
+  # Pull requests share the issues listing, so count them toward TITLES_LIMIT before dropping them.
   titles_raw=0
   titles_page=1
   titles_pages=""
   while [ "$titles_raw" -lt "$TITLES_LIMIT" ]; do
     page_json="$(gh_api "repos/$REPO/issues?state=open&per_page=100&page=$titles_page")" \
       || die "ERROR: could not list open issues to check for duplicates ($(gh_api_err)). Nothing was created."
-    # Fail closed on the shape: a reply that is not an array of issues would
-    # otherwise count as an empty page and end the listing as "no duplicates".
+    # Fail closed: a non-array reply would read as an empty page and end the listing as "no duplicates".
     page_len="$(printf '%s' "$page_json" | jq -r 'if type == "array" then length else empty end' 2>/dev/null)"
     [ -n "$page_len" ] || die "ERROR: the duplicate check failed, so this cannot say there are no duplicates.
        The open-issue listing came back in an unrecognised shape. $NOTHING"
@@ -970,15 +690,13 @@ if [ "$MODE" = create ]; then
   done
   printf '%s' "$titles_pages" \
     | jq -s '[.[][] | select(has("pull_request") | not) | {number, title}]' >"$TITLES_JSON"
-  # A full listing means there may be more open issues than were read, and a
-  # match among those is missed. Say so; checking past the limit is #19.
+  # A full listing may hide more open issues; checking past the limit is #19.
   if [ "$titles_raw" -ge "$TITLES_LIMIT" ]; then
     echo "WARNING: the duplicate check read only the first $TITLES_LIMIT open issues."
     echo "         The repo may have more, and a duplicate among them would be missed."
     echo
   fi
-  # Fail closed. DUPES is the only thing standing between a create run and
-  # its write, so a checker that crashed must not read as "none found".
+  # Fail closed: a crashed checker must not read as "none found".
   DUPES="$(python3 "$SCRIPT_DIR/issue_text.py" dupes "$TITLE" "$TITLES_JSON")" \
     || die "ERROR: the duplicate check failed, so this cannot say there are no duplicates. $NOTHING"
   if [ -n "$DUPES" ]; then
@@ -1010,21 +728,10 @@ else
 fi
 echo "  parent     ${PARENT:-none}"
 
-# WHERE IT IS GOING, AND — IN ADOPT MODE — WHERE IT IS TODAY.
-#
-# Adopt refuses rather than reconciles for parent, blocked-by and blocks. It
-# does NOT for board position: all four placement answers are mandatory, so a
-# position is always named, and refusing every adopt of a boarded issue would
-# make the tool unusable for re-prioritising. So it MOVES the issue — and it
-# used to do so with the confirmation screen showing only the destination. The
-# operator confirmed a move whose cost, a priority slot that was a real prior
-# decision, was invisible before and left no trace afterwards to reconstruct.
-# The fix is disclosure: name the current slot beside the requested one, and
-# say plainly when confirming will move it.
+# Adopt can move a boarded issue, so name its current slot beside the requested one and say when confirming moves it.
 POSITION_LINE="$( [ "$TOP" -eq 1 ] && echo "top of board" || echo "after #$AFTER" )"
 if [ "$CLOUD" -eq 1 ]; then
-  # Nothing here moves in cloud mode, so there is no current slot to name and
-  # no move to latch: ADOPT_MOVED stays 0 and no move comment is written.
+  # Cloud mode moves nothing: no current slot to name, no move comment.
   POSITION_LINE="decided later (cloud mode; labelled $BOARD_PENDING_LABEL for a local session to place)"
 elif [ "$MODE" = adopt ]; then
   ADOPT_IDX="$(printf '%s\n' "$BOARD_NUMS" | grep -nxF -- "$ADOPT" | head -1 | cut -d: -f1)"
@@ -1039,11 +746,7 @@ elif [ "$MODE" = adopt ]; then
       ADOPT_MOVED=0
     else
       POSITION_LINE="$POSITION_LINE  ($ADOPT_WHERE — this MOVES it)"
-      # Disclosure before was only half the fix: once confirmed, the previous
-      # position was still unrecoverable. Latch it here, in the SAME branch
-      # that prints "this MOVES it", so the record written after the read-back
-      # is the very judgement the operator saw — not a second opinion formed
-      # from a second board read.
+      # Latch here, where "this MOVES it" is printed, so the move record matches what the operator saw.
       ADOPT_MOVED=1
       ADOPT_FROM_IDX="$ADOPT_IDX"
       ADOPT_FROM_PREV="$ADOPT_PREV"
@@ -1060,14 +763,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
   exit 0
 fi
 
-# There is no confirmation prompt. Under an agent, stdin is never a terminal,
-# so the prompt only ever read a `y` piped in ahead of time. What it guarded
-# that the engine cannot judge is whether this is a duplicate, so that is
-# where a run stops: possible duplicates and no --file-anyway means nothing is
-# written, with an exit code of its own so the caller can tell "go judge
-# these" from a refusal. Everything else -- the placement refusals, the
-# truncated board, adopt's refusals, the read-back, the move record -- never
-# depended on the prompt and still runs.
+# No confirmation prompt: possible duplicates without --file-anyway exit 3, the one judgement the engine can't make.
 if [ "$MODE" = create ] && [ -n "$DUPES" ] && [ "$FILE_ANYWAY" -eq 0 ]; then
   printf '%s\n' "STOPPED: possible duplicates listed above. $NOTHING
        If none of them is the same work, re-run the same command with
@@ -1075,19 +771,10 @@ if [ "$MODE" = create ] && [ -n "$DUPES" ] && [ "$FILE_ANYWAY" -eq 0 ]; then
   exit 3
 fi
 
-# ---------------------------------------------------------------------------
-# Apply. This is the ONE place the two modes legitimately differ: create
-# writes the issue and then every relationship asked for; adopt writes only
-# the ones that are not already there. Both write through write_links, one
-# REST call per link, and both leave the verdict to the shared read-back.
-# ---------------------------------------------------------------------------
+# Apply: create writes the issue and every link, adopt only missing links; the shared read-back decides.
 
 half_wired_head() {
-  # The part every failure shares. Never leave the operator guessing what
-  # exists on the server. The mismatch sentence and the requested-state
-  # summary are IDENTICAL in both modes; only the provenance and the next
-  # action differ, because only they depend on whether this run created the
-  # issue.
+  # Shared by every failure; only the provenance and next action differ between modes.
   printf '\n' >&2
   printf 'MISMATCH: %s\n' "$1" >&2
   printf '\n' >&2
@@ -1101,20 +788,7 @@ half_wired_head() {
 }
 
 reverify_command() {
-  # The one command that re-runs every check on an issue that already exists,
-  # and is SAFE on a correctly wired one: adopt mode writes only relationships
-  # that are not already there, and reads all of them back. This is what makes
-  # a "could not look" refusal clearable instead of a dead end. It runs over
-  # REST, so it works where GraphQL is refused.
-  #
-  # It leads with the config's file_issue_cmd when set: the script and
-  # --config paths this run was given may exist only in a cloud session.
-  #
-  # In cloud mode it is re-run from the same cloud session, which refuses
-  # --after and --top, so it carries --position-later (#14 KTD10).
-  #
-  # $1, when given, replaces the position answer: the cloud notice prints the
-  # command a LOCAL session runs, whose position is still to be chosen.
+  # The adopt re-run: safe on a wired issue, REST-only, led by file_issue_cmd or this run's paths; $1 overrides the position answer.
   local position="${1-}"
   if [ -z "$position" ]; then
     if [ "$CLOUD" -eq 1 ]; then
@@ -1138,21 +812,14 @@ reverify_command() {
 }
 
 half_wired() {
-  # DID NOT LAND — the server itself reported a state contradicting the answer
-  # given. The wiring is proven wrong, so this is the only cause whose next
-  # action may include re-filing.
+  # DID NOT LAND: the server contradicts the answer; the only case whose next action may be re-filing.
   half_wired_head "$1"
   printf '%s\n' "$HALF_WIRED_NEXT" >&2
   exit 1
 }
 
 half_wired_absent() {
-  # DID NOT LAND, as far as a bounded wait could establish: the board listing
-  # never showed the issue and the corroborating single-item read never showed
-  # it either. Both queries hit the same Projects store and share its
-  # replication lag, so their agreement is a weak signal — the refusal rests on
-  # the EXHAUSTED BOUND, not on that agreement. Nothing here proved the wiring
-  # wrong, so nothing here may tell the operator to re-file.
+  # DID NOT LAND within the bounded wait: both reads share replication lag, so never tell the operator to re-file.
   half_wired_head "$1"
   printf 'Read %s times over %ss; the board never showed it and a direct read of the\n' \
     "$READBACK_ATTEMPTS" "$READBACK_WAITED" >&2
@@ -1172,10 +839,7 @@ half_wired_absent() {
 }
 
 half_wired_unverified() {
-  # POSITION UNVERIFIED. Membership IS proven — a direct read of the issue's
-  # board item returned it. Position is an index into the
-  # board listing, and the listing never caught up, so there was nothing to
-  # compare it against. This is not a failed write and must never read as one.
+  # POSITION UNVERIFIED: membership is proven, but the listing never caught up to show position; not a failed write.
   half_wired_head "$1"
   printf 'Membership is PROVEN: a direct read of the board item of #%s returned it on\n' "$NUM" >&2
   printf 'project %s. Only the POSITION is unverified — the board listing was\n' "$PROJECT_NUMBER" >&2
@@ -1188,9 +852,7 @@ half_wired_unverified() {
 }
 
 half_wired_unreadable() {
-  # COULD NOT LOOK. The READ failed, not the write. Unable to look is not
-  # evidence of absence, so this says so and hands over the command that
-  # settles it once the read works again.
+  # COULD NOT LOOK: the read failed, not the write; not being able to look is not evidence of absence.
   half_wired_head "$1"
   printf 'The READ failed, not the write. Nothing here says the write did not land, and\n' >&2
   printf 'no relationship was proven wrong. Re-run the check once the board reads again:\n' >&2
@@ -1199,13 +861,7 @@ half_wired_unreadable() {
 }
 
 resolve_or_refuse() {
-  # $1 the flag that named the issue, $2 its number. Sets RESOLVED_ID to the
-  # issue's numeric id, or refuses: every link write needs an id, and a number
-  # that does not resolve is refused BEFORE anything is written. The single
-  # `gh issue create` this replaced failed atomically on a missing number;
-  # REST create is several calls, and a typo found after the first would
-  # leave a real issue half-wired. Called in the CURRENT SHELL, so its die
-  # reaches the shell running the script.
+  # Sets RESOLVED_ID or refuses before any write; call in the current shell so die exits the script.
   local id rc
   id="$(issue_numeric_id "$2")"
   rc=$?
@@ -1220,10 +876,7 @@ resolve_or_refuse() {
 
 LINK_WRITE_FAILED=0
 post_link() {
-  # $1 what the link is, for the warning; the rest are `gh api` arguments.
-  # A failed write is a WARNING, not fatal, and NOT evidence that nothing
-  # landed: a call can fail after the server applied it, so the read-back is
-  # what establishes the true state.
+  # A failed call only warns: it can fail after the server applied it, so the read-back decides.
   local what="$1"
   shift
   if ! gh_api -X POST "$@" >/dev/null; then
@@ -1233,11 +886,7 @@ post_link() {
 }
 
 write_links() {
-  # $1 the parent to put #$NUM under, or empty. $2 its blockers, as
-  # "number:id" pairs. $3 the issues it blocks, as numbers. Each link is its
-  # own REST call. A blocks link is the OTHER issue's blocked-by link, so it
-  # is written against that issue, carrying #$NUM's own id. An empty answer
-  # writes nothing -- never an empty link.
+  # $1 parent or empty, $2 "number:id" blockers, $3 blocked numbers; a blocks link carries #$NUM's id.
   local pair n
   [ -n "$1" ] && post_link "parent #$1" "repos/$REPO/issues/$1/sub_issues" -F sub_issue_id="$SELF_ID"
   for pair in $2; do
@@ -1254,9 +903,7 @@ write_links() {
 
 RESOLVED_ID=""
 if [ "$MODE" = create ]; then
-  # Resolve every referenced issue first (#14 KTD3). The parent and each
-  # blocked issue are read only to prove they exist; each blocker's id is
-  # what its link write takes.
+  # Resolve every referenced issue first (#14 KTD3); a blocker's link write takes its id.
   [ -n "$PARENT" ] && resolve_or_refuse --parent "$PARENT"
   CREATE_BLOCKER_PAIRS=""
   for n in $BLOCKED_LIST; do
@@ -1267,10 +914,7 @@ if [ "$MODE" = create ]; then
     resolve_or_refuse --blocks "$n"
   done
 
-  # The issue first, then each link, then the read-back judges (#14 KTD4).
-  # The window in which the issue exists partly linked is accepted: a failed
-  # link write warns and carries on, and the refusal the read-back picks names
-  # the adopt command that writes only what is missing.
+  # Issue first, then each link (#14 KTD4); a failed link only warns and the read-back names the fix.
   CREATE_REPLY="$(gh_api -X POST "repos/$REPO/issues" -f title="$TITLE" -F body=@"$BODY_FILE" "${LABEL_FIELDS[@]}")" \
     || die "ERROR: the issue create failed: $(gh_api_err)
        Nothing to read back."
@@ -1281,9 +925,7 @@ if [ "$MODE" = create ]; then
   case "$SELF_ID" in ''|*[!0-9]*) die "ERROR: could not read the id of #$NUM out of the create reply: $CREATE_REPLY" ;; esac
   [ -n "$URL" ] || die "ERROR: could not read the URL of #$NUM out of the create reply: $CREATE_REPLY"
   HALF_WIRED_PROVENANCE="It is left HALF-WIRED — the create succeeded and this relationship did not."
-  # Leads with the adopt command: it writes only the links that are missing,
-  # reads every one back, and runs over REST. Deleting an issue needs GraphQL,
-  # so delete-and-re-run is offered only as a local-session alternative.
+  # Lead with the adopt command (REST, writes only missing links); delete-and-re-run needs GraphQL, so local only.
   HALF_WIRED_NEXT="Finish it with this command. It writes only the links that are missing, reads every one back, and needs no GraphQL:
 $(reverify_command)
 In a local session you may instead delete #$NUM and re-run. Do not assume it is fine."
@@ -1295,25 +937,7 @@ else
   HALF_WIRED_PROVENANCE="It is left PARTLY WIRED — relationships this run wrote may have landed, and this one did not agree."
   HALF_WIRED_NEXT="Finish it by hand, then re-run this command. Do not delete #$NUM — nothing here proved its wiring wrong."
 
-  # A DELTA, not a set. `gh issue edit` is NOT idempotent on either kind of
-  # relationship — measured against the live board on 2026-08-24 with gh
-  # 2.98.0, recorded on #233. Re-adding a link that is already there fails the
-  # WHOLE call:
-  #   gh issue edit 234 --add-blocked-by 233 -> Validation failed: Target issue
-  #        has already been taken (addBlockedBy), exit 1
-  #   gh issue edit 234 --parent 240         -> Issue may not contain duplicate
-  #        sub-issues (addSubIssue), exit 1
-  # The pre-existing link survived both, so it is a refusal, not corruption.
-  # The REST writes that replaced it (#14) carry one link each, so a repeat
-  # can cost only its own call -- but REST is assumed to refuse a repeat the
-  # same way, not measured, so the delta stands. A link is written ONLY when
-  # it is NOT already there. A contradicting one has already been refused
-  # above; an already matching one is skipped. If the delta is empty nothing
-  # is written at all — and the read-back still runs, because it is the only
-  # proof anything holds.
-  # Every number about to be linked is resolved before any write, as create
-  # does (KTD3). A typo found by its own POST would come after the other links
-  # had landed, leaving the issue partly wired.
+  # Write a delta, not a set: gh refused repeated links, and REST is assumed (not measured) to do the same.
   ADD_PARENT=""
   [ -n "$PARENT" ] && [ "$PARENT" != "$FOUND_PARENT" ] && ADD_PARENT="$PARENT"
   [ -n "$ADD_PARENT" ] && resolve_or_refuse --parent "$ADD_PARENT"
@@ -1338,8 +962,6 @@ else
   else
     write_links "$ADD_PARENT" "$ADD_BLOCKED_PAIRS" "$ADD_BLOCKING"
   fi
-  # A delta like the links: added only when it is not already there, and the
-  # read-back proves it either way (#14 R9).
   if [ "$CLOUD" -eq 1 ] && [ "$FOUND_LABEL" = absent ]; then
     post_link "the $BOARD_PENDING_LABEL label" "repos/$REPO/issues/$NUM/labels" \
       -f "labels[]=$BOARD_PENDING_LABEL"
@@ -1347,23 +969,19 @@ else
   echo "wiring #$NUM  $URL"
 fi
 
-# ---------------------------------------------------------------------------
-# SHARED BOARD HALF. Both modes call these, in the current shell.
-# ---------------------------------------------------------------------------
+# Shared board half: both modes call these in the current shell.
 
 ITEM_ID=""             # the item's node id, which the position write takes
 ITEM_REST_ID=""        # its numeric REST id, which the single-item read takes
 POSITION_DEGRADED=0    # 1 once GitHub has refused the position write (#14 KTD2)
 
 board_row_item() {
-  # $1 board rows as read_board prints them, $2 an issue number. Prints that
-  # issue's "<node id>\t<numeric id>", or nothing when it is not a row.
+  # Prints the issue's "<node id>\t<numeric id>" from board rows $1, or nothing if it isn't a row.
   printf '%s\n' "$1" | awk -F'\t' -v n="$2" '$1 == n {print $3 "\t" $4; exit}'
 }
 
 take_item() {
-  # $1 "<node id>\t<numeric id>". Sets ITEM_ID and ITEM_REST_ID when both are
-  # really there; leaves them empty otherwise, so the caller's fallback runs.
+  # Sets ITEM_ID and ITEM_REST_ID only when both are valid, so the caller's fallback runs otherwise.
   local node="${1%%	*}" id="${1#*	}"
   case "$node" in ''|null) return 1 ;; esac
   case "$id" in ''|*[!0-9]*) return 1 ;; esac
@@ -1372,17 +990,7 @@ take_item() {
 }
 
 board_membership_corroboration() {
-  # The SECOND query path over the same Projects store, issued on EVERY
-  # read-back attempt on which the board listing does not show the issue:
-  # the single item, read by the numeric id item-add or the listing gave it
-  # (#14 KTD5).
-  #
-  # A POSITIVE result is conclusive: the listing was stale and membership is
-  # proven. Agreement on ABSENCE is a weaker signal — both queries hit the
-  # same store and share its replication lag — and is never what a refusal
-  # rests on; the refusal rests on the exhausted bound. So anything short of
-  # a reply naming #$1 as the item's content -- an error, a 404, a reply of
-  # another shape -- is "not shown", never a pass.
+  # Second query path (#14 KTD5): a hit proves membership; a miss is weak (shared lag) and never grounds a refusal.
   local reply
   [ -n "$ITEM_REST_ID" ] || return 1
   reply="$(gh_api "$PROJECT_PATH/items/$ITEM_REST_ID")" || return 1
@@ -1390,14 +998,7 @@ board_membership_corroboration() {
 }
 
 write_position() {
-  # The ONE GraphQL call left (#14 KTD2): no REST route sets a board position.
-  # $1 the node id of the item to follow, or empty for the top.
-  #
-  # Classified by its error. Exit non-zero with gh's `(HTTP 403)` means GitHub
-  # REFUSED it -- a session without GraphQL access -- so the position is
-  # recorded as degraded and the run carries on: the item is on the board,
-  # wherever it landed, and the read-back still proves that. Any other failure
-  # is the half-wired refusal it has always been.
+  # The one GraphQL call left: no REST route sets position (#14 KTD2). A 403 degrades position; else half-wired.
   if [ -z "$1" ]; then
     gh_api graphql -f query='mutation($p:ID!,$i:ID!){updateProjectV2ItemPosition(input:{projectId:$p,itemId:$i}){clientMutationId}}' \
       -f p="$PROJECT_ID" -f i="$ITEM_ID" >/dev/null && return 0
@@ -1406,10 +1007,7 @@ write_position() {
       -f p="$PROJECT_ID" -f i="$ITEM_ID" -f a="$1" >/dev/null && return 0
   fi
   if gh_api_failed_with 403; then
-    # An adopted issue the summary already found in the asked-for slot did
-    # not need to move, so a refused write changed nothing: leave the
-    # position to the read-back, which proves it, instead of reporting it
-    # NOT SET and sending the operator to fix a position that is right.
+    # An adopted issue already in the asked-for slot didn't move; leave its position to the read-back, not NOT SET.
     [ "$MODE" = adopt ] && [ -n "$ADOPT_IDX" ] && [ "$ADOPT_MOVED" -eq 0 ] && return 0
     POSITION_DEGRADED=1
     return 0
@@ -1418,25 +1016,11 @@ write_position() {
 }
 
 board_half() {
-  # Puts the issue on project 2 if it is not there and writes its position.
-  #
-  # Takes NO arguments, and reads the globals $NUM and $URL. It used to take
-  # them as $1 and $2 while its failure path fell through to half_wired_head,
-  # which prints the GLOBALS — so it looked parameterised and was not. With one
-  # call site the two could never disagree, which is exactly what makes that
-  # shape a trap: the day a second call site passes a different number, every
-  # refusal names the wrong issue and nothing complains. Reading the globals in
-  # one place is the honest version.
-  #
-  # Calls half_wired directly, so it MUST be invoked in the current shell.
+  # No arguments: the failure path prints the globals $NUM and $URL. Call in the current shell; it calls half_wired.
   local add_err="" after_item rows
-  # Cloud mode never touches the board (#14 R10). Returning here, rather than
-  # skipping the call, keeps the call site the bare line OneImplementation
-  # requires.
+  # Cloud mode never touches the board (#14 R10); returning here keeps the call site a bare line.
   [ "$CLOUD" -eq 1 ] && return 0
-  # An adopted issue already on the board takes its item from the pre-write
-  # listing, so it does not depend on item-add's output: item-add refuses an
-  # issue already there, and that would abort a correctly wired filing.
+  # Use the pre-write listing's item for an issue already on the board; item-add refuses it.
   if [ "$MODE" = adopt ]; then
     take_item "$(board_row_item "$BOARD_ROWS" "$NUM")"
   fi
@@ -1445,12 +1029,7 @@ board_half() {
       | jq -r '"\(.node_id)\t\(.id)"' 2>/dev/null)" \
       || add_err="$(gh_api_err)"
   fi
-  # A board with GitHub's auto-add workflow puts a NEW issue on it before
-  # item-add runs, and item-add then refuses it as already there and returns
-  # no item. The issue IS on the board, so look for it in a fresh listing
-  # before calling this a failure (pluckd #504, #508) -- fresh, because the
-  # pre-write listing predates a just-created issue. A listing that cannot
-  # be read is a could-not-look, never a did-not-land.
+  # Auto-add can board a new issue first, making item-add refuse; find it in a fresh listing (unreadable is could-not-look).
   if [ -z "$ITEM_ID" ]; then
     rows="$(read_board "${BOARD_JSON}.2")" \
       || half_wired_unreadable "the board (project $PROJECT_NUMBER) could not be re-read to find the item for #$NUM"
@@ -1461,11 +1040,7 @@ board_half() {
   if [ "$TOP" -eq 1 ]; then
     write_position ""
   else
-    # From the PRE-WRITE listing, which the gate above already proved holds
-    # #$AFTER -- so the item cannot be ABSENT here. A row with no node id is a
-    # listing this cannot read, and a read that failed proves nothing about
-    # #$AFTER, so it must never reach half_wired(), whose next action
-    # includes deleting the issue.
+    # Row from the pre-write listing, which the gate proved holds #$AFTER; no node id means unreadable, not absent.
     after_item="$(board_row_item "$BOARD_ROWS" "$AFTER" | cut -f1)"
     case "$after_item" in
       ''|null) half_wired_unreadable "the board item for #$AFTER could not be read, so #$NUM could not be positioned" ;;
@@ -1474,22 +1049,14 @@ board_half() {
   fi
 }
 
-# In the CURRENT SHELL. Assigned from a command substitution instead, the exit
-# inside half_wired would kill only the subshell, the assignment would succeed,
-# and the run would report success — a vacuous pass in the very guard this
-# script is.
+# Current shell: in a command substitution, half_wired's exit would kill only the subshell and the run would pass.
 board_half
 
 # >>> SHARED READ-BACK START
-# Read back. An exit code is not evidence. Both modes call this ONE
-# implementation; no relationship comparison exists anywhere else in this file,
-# and tests/test_engine_gating.py scans for a second copy.
+# An exit code is not evidence; both modes use this one implementation, and a test scans for a second copy.
 DEPENDENCY_NUMBERS=""
 read_dependency_numbers() {
-  # $1 the dependency list (blocked_by or blocking), $2 its name in a refusal.
-  # Sets DEPENDENCY_NUMBERS to the linked issue numbers in comparison form,
-  # or refuses as COULD NOT LOOK. Sets a global rather than printing so its
-  # refusal exits the shell running the script: call it in the CURRENT SHELL.
+  # Sets DEPENDENCY_NUMBERS or refuses as COULD NOT LOOK; call in the current shell so the refusal exits.
   local reply rc entries
   reply="$(gh_api "repos/$REPO/issues/$NUM/dependencies/$1?per_page=100")"
   rc=$?
@@ -1502,34 +1069,15 @@ read_dependency_numbers() {
 }
 
 read_back_board() {
-  # The board half of read_back: membership and position. Called only from
-  # read_back, in the current shell, because it calls half_wired_* directly.
-  # Cloud mode does not call it (#14 R13).
-  #
-  # THREE STATES, not two. A board write is not read-your-writes consistent,
-  # so "the listing does not show it" means one of: not yet visible, did not
-  # land, or the read did not answer. They call for different operator
-  # actions, so they are resolved separately and refused separately.
-  #
-  # The retry is on the READ only (KD1). No mutation is re-issued, and the
-  # bound is finite: this still fails when the write genuinely did not land.
+  # Board half of read_back: not yet visible, did not land and could not look are refused apart; only reads retry (KD1).
   local attempt=1 delay="$READBACK_DELAY"
   local in_listing=0 member_proven=0 position_ok=0 position_msg=""
-  # PROOF IS LATCHED, because it does not expire. The refusal used to be chosen
-  # from the LAST attempt's in_listing alone: an early attempt that SAW the
-  # issue and found its position wrong, followed by a listing that went silent,
-  # left in_listing at 0 and member_proven at 1, threw position_msg away, and
-  # told the operator "the board listing never showed it" and "Nothing here
-  # proved the position wrong" — both false, and a did-not-land routed into the
-  # probably-fine bucket. Once the server has shown a wrong position, that is
-  # settled; no later silence unsettles it.
+  # Proof is latched: once the server has shown a wrong position, later listing silence doesn't unsettle it.
   local position_proven_wrong=0
   READBACK_WAITED=0
 
   while : ; do
-    # A failed page, a page cap or a rows-vs-distinct truncation is FATAL in
-    # board.sh and stays fatal here. Unable to look is not permission, and it
-    # is never a reason to keep waiting.
+    # A failed page, page cap or truncation is fatal, never a reason to keep waiting.
     BOARD2_ROWS="$(read_board "${BOARD_JSON}.2")" \
       || half_wired_unreadable "the board (project $PROJECT_NUMBER) could not be re-read to verify #$NUM"
     BOARD2_NUMS="$(printf '%s\n' "$BOARD2_ROWS" | cut -f1)"
@@ -1537,9 +1085,7 @@ read_back_board() {
     if printf '%s\n' "$BOARD2_NUMS" | grep -qxF -- "$NUM"; then
       in_listing=1
       member_proven=1
-      # A DEGRADED position was never written, so there is no position to
-      # compare (#14 KTD8): membership is the whole board check, and it is
-      # proven.
+      # A degraded position was never written, so membership is the whole board check (#14 KTD8).
       [ "$POSITION_DEGRADED" -eq 1 ] && break
       IDX2="$(printf '%s\n' "$BOARD2_NUMS" | grep -nxF -- "$NUM" | head -1 | cut -d: -f1)"
       if [ "$TOP" -eq 1 ]; then
@@ -1563,11 +1109,7 @@ read_back_board() {
       [ "$position_ok" -eq 1 ] && break
     else
       in_listing=0
-      # Every attempt on which the listing is silent, ask the store directly.
-      # A positive answer proves MEMBERSHIP; it does not finish the check,
-      # because position is an index into the listing and until the listing
-      # shows the issue there is nothing to compare. A degraded position has
-      # nothing to compare either way, so there it does finish the check.
+      # Listing silent: ask the store directly. A hit proves membership; position still needs the listing unless degraded.
       if board_membership_corroboration "$NUM"; then
         member_proven=1
         [ "$POSITION_DEGRADED" -eq 1 ] && break
@@ -1584,22 +1126,11 @@ read_back_board() {
   done
 
   if [ "$POSITION_DEGRADED" -eq 1 ]; then
-    # No position was written, so none was compared and the latch below can
-    # never have been set. Membership is the whole board verdict, proven by
-    # the listing or the corroborating read within the same bound -- and an
-    # issue neither ever showed is refused exactly as it is when the position
-    # write succeeded.
+    # No position was written, so membership is the whole verdict.
     [ "$member_proven" -eq 1 ] \
       || half_wired_absent "#$NUM is not on the board (project $PROJECT_NUMBER) after being added to it"
   else
-    # The latch is read FIRST, ahead of the in_listing dispatch, and it is read
-    # only when NO attempt ever saw the position right. Convergence still wins:
-    # a listing that showed a wrong position and then showed the right one has
-    # caught up, which is the whole point of KD1's retry, and that path breaks
-    # out of the loop with position_ok=1 before ever reaching here. What must not
-    # survive is the other order — proven wrong, then silence — which used to
-    # discard the proof and report POSITION UNVERIFIED over a position the server
-    # itself had already contradicted.
+    # Read the latch only if no attempt saw the right position: proven wrong, then silent, is not UNVERIFIED.
     if [ "$position_ok" -eq 0 ] && [ "$position_proven_wrong" -eq 1 ]; then
       half_wired "$position_msg"
     fi
@@ -1611,11 +1142,7 @@ read_back_board() {
     fi
     [ "$position_ok" -eq 1 ] || half_wired "$position_msg"
 
-    # THE LANDING INDEX, retained at the one point it has been PROVEN — every
-    # path above this line either exits through a half_wired_* refusal or has
-    # compared the index the server reported against what was asked for. The
-    # move record written after this function returns reads this, so it can
-    # never name a position that was not verified, and it costs no extra read.
+    # The landing index, kept where it is proven, so the move record never names an unverified position.
     ADOPT_LANDED_IDX="$IDX2"
   fi
 
@@ -1627,12 +1154,7 @@ read_back_board() {
       echo "         convergence when you can. If you need more budget now, raise" >&2
       echo "         FILE_ISSUE_READBACK_DELAY, not _ATTEMPTS — attempts cost the" >&2
       echo "         30-second ceiling faster since the wait doubles each time." >&2
-      # The highest DELAY the ceiling still accepts at this ATTEMPTS, computed
-      # the same way READBACK_WORST_CASE is above: never name a knob the
-      # ceiling check two screens up would refuse. The loop stops doubling
-      # once warn_pow2 already clears the ceiling — past that point the
-      # quotient below can only be 0, so further doubling changes nothing
-      # except risking bash's 64-bit wraparound at absurd ATTEMPTS values.
+      # Highest DELAY the ceiling allows at this ATTEMPTS; stop doubling once past the ceiling to avoid 64-bit wraparound.
       warn_pow2=1; warn_i=1
       while [ "$warn_i" -lt "$READBACK_ATTEMPTS" ] && [ "$warn_pow2" -le "$READBACK_CEILING" ]; do
         warn_pow2=$(( warn_pow2 * 2 ))
@@ -1641,11 +1163,7 @@ read_back_board() {
       warn_denom=$(( warn_pow2 - 1 ))
       [ "$warn_denom" -lt 1 ] && warn_denom=1
       warn_suggested=$(( READBACK_CEILING / warn_denom ))
-      # Only ever NAME a DELAY that is a real, positive improvement over the
-      # one already in effect. Below ATTEMPTS=6 the ceiling has genuine room;
-      # at and above it the quotient floors to 0 — printing that as "the
-      # ceiling allows up to" would repeat the exact bug this warning was
-      # rewritten to stop: naming a knob that helps nothing.
+      # Name a DELAY only if it helps; from ATTEMPTS=6 the quotient floors to 0.
       if [ "$warn_suggested" -gt 0 ] && [ "$warn_suggested" -gt "$READBACK_DELAY" ]; then
         echo "         At ATTEMPTS=$READBACK_ATTEMPTS the ceiling allows up to" >&2
         echo "         FILE_ISSUE_READBACK_DELAY=$warn_suggested." >&2
@@ -1670,39 +1188,18 @@ read_back_board() {
 }
 
 read_back() {
-  # Compares every relationship against the four answers.
-  #
-  # Takes NO arguments, and reads the globals $NUM and $URL, for the same
-  # reason board_half does: its failure path falls through to half_wired_head,
-  # which prints the globals. A parameter that the failure path ignores is a
-  # parameter that lies.
-  #
-  # Calls half_wired directly, so it MUST be invoked in the current shell.
+  # No arguments: the failure path prints the globals $NUM and $URL. Call in the current shell.
   echo
   echo "READ-BACK"
 
   if [ "$CLOUD" -eq 1 ]; then
-    # Nothing was read, so nothing is "ok": say what was not checked.
     echo "  board membership   not checked (cloud mode)"
     echo "  board position     not checked (cloud mode)"
   else
     read_back_board
   fi
 
-  # Three REST reads (#14 KTD6): the issue, for its parent, and its two
-  # dependency lists. EACH REPLY'S SHAPE IS CHECKED, because emptiness alone
-  # was a vacuous pass. A reply that simply lacks the fields compared —
-  # `{"message":"Not Found"}` is the one that reproduced it — extracts as
-  # empty, and empty compares EQUAL to the empty answer set. On the commonest
-  # filing shape, `--no-parent --blocked-by none --blocks none`, the run
-  # printed three `ok (none)` lines and exited 0 having proven NOTHING at all.
-  # So the issue reply must carry a number and a state, its parent must parse,
-  # and each dependency reply must be an array -- the same checks adopt's
-  # pre-fetch makes, through the same parsers.
-  #
-  # All of them are COULD NOT LOOK, never did not land: a read that failed
-  # says nothing about the write, and its refusal must not offer to delete
-  # anything.
+  # Three REST reads (#14 KTD6), each shape-checked since an error reply extracts as empty; failures never offer delete.
   REL_JSON="$(gh_api "repos/$REPO/issues/$NUM")"
   REL_RC=$?
   [ "$REL_RC" -eq 0 ] || half_wired_unreadable "the relationships of #$NUM could not be read back — gh exited $REL_RC: $(gh_api_err)"
@@ -1735,9 +1232,7 @@ read_back() {
     || half_wired "blocks — asked for #$NUM to block [${BLOCKING_WANT:-none}]; it reads back blocking [${BLOCKING_READ:-none}]"
   echo "  blocks             ok (${BLOCKING_WANT:-none})"
 
-  # The board-pending label is what keeps a cloud filing from being lost, so a
-  # cloud run is not done until it reads back present (#14 R12). It comes from
-  # the same issue reply as the parent; no extra read.
+  # The board-pending label keeps a cloud filing from being lost, so it must read back present (#14 R12).
   if [ "$CLOUD" -eq 1 ]; then
     LABEL_READ="$(issue_reply_label "$REL_JSON" "$BOARD_PENDING_LABEL")"
     [ "$LABEL_READ" != "BAD" ] \
@@ -1752,26 +1247,9 @@ read_back() {
 # In the CURRENT SHELL, for the same reason board_half is.
 read_back
 
-# ---------------------------------------------------------------------------
-# RECORD THE MOVE. Only reachable when read_back RETURNED, and read_back never
-# returns on a mismatch — every failure path in it ends in a half_wired_* that
-# exits. So the position this comment claims has been read back off the server
-# and proven. That ordering is the whole guarantee, and it is why this block
-# sits after the call rather than inside the read-back loop: a comment naming a
-# move that did not land is worse than no comment at all.
-#
-# The landing ordinal comes from $ADOPT_LANDED_IDX, which read_back sets from
-# the very index its own position check compared against, at the point that
-# check passed. Nothing here reads the board again.
-#
-# A DEGRADED position records nothing: the position write was refused, so the
-# issue did not move and there is no move to record (#14 KTD8). The adopt run
-# that places it later, from a local session, records its own move.
+# Record the move: read_back passed, so the position is proven; a degraded position records nothing (#14 KTD8).
 if [ "$ADOPT_MOVED" -eq 1 ] && [ "$POSITION_DEGRADED" -eq 0 ]; then
-  # Each side names its ordinal AND what it follows. An ordinal on its own is
-  # meaningless once the board shifts under it, and a slot at the head of the
-  # board follows nothing — so it reads as the top rather than as "following #"
-  # with an empty number after it.
+  # Name each side's ordinal and what it follows; an ordinal alone means nothing once the board shifts.
   MOVE_FROM="position $ADOPT_FROM_IDX ($( [ -n "$ADOPT_FROM_PREV" ] \
     && printf 'following #%s' "$ADOPT_FROM_PREV" \
     || printf 'the top of the board' ))"
@@ -1786,20 +1264,7 @@ onto project $PROJECT_NUMBER, so the slot it came from stays recoverable.
 The destination was read back from the board and verified; the origin is the
 slot shown in the pre-write summary immediately before the move."
 
-  # BEST EFFORT, AND LOUD WHEN IT FAILS. The wiring has already landed and
-  # already been verified by the time this runs. So a failed comment must not
-  # call die or any half_wired_* function: those print the delete-and-re-run
-  # remedy, which on a correctly wired issue is destructive advice. It must
-  # also not be silent, or the promise that a move is always recorded becomes
-  # one the tool quietly breaks. So: warn on stderr, carry both positions in
-  # text the operator can paste, and still exit 0 — because the wiring did
-  # succeed.
-  #
-  # A comment is the one write in this project that legitimately bypasses
-  # this script (docs/WORKFLOW.md § 7 names it, as `gh issue comment`),
-  # because a comment creates no issue and touches no board field. This posts
-  # the same comment over REST (#14); it relies on that existing carve-out and
-  # does not widen it.
+  # Best effort: the wiring is verified, so a failed comment warns with pasteable text and exits 0, never offering delete.
   MOVE_RC=0
   gh_api -X POST "repos/$REPO/issues/$NUM/comments" -f body="$MOVE_COMMENT" >/dev/null \
     || MOVE_RC=$?
@@ -1821,30 +1286,19 @@ slot shown in the pre-write summary immediately before the move."
   fi
 fi
 
-# CLEAR THE BOARD-PENDING LABEL (#14 R15, R16). A cloud run labelled this
-# issue because it could not place it; this local adopt has just placed it and
-# read the position back, so the label's reason is gone. Only reachable once
-# read_back returned, and skipped when the position was NOT SET, because then
-# the issue is still unplaced.
-#
-# Best effort and loud, like the move record above: the placement is verified
-# and stands, so a failure here must not call die or any half_wired_*, whose
-# advice would be wrong on a correctly placed issue. The removal is read back
-# with a fresh read, because the read-back's issue reply predates it.
+# Clear the board-pending label (#14 R15, R16) once a local adopt has placed the issue; best effort, skipped if NOT SET.
 if [ "$MODE" = adopt ] && [ "$CLOUD" -eq 0 ] && [ "$POSITION_DEGRADED" -eq 0 ] \
    && [ "$FOUND_LABEL" = present ]; then
   UNLABEL_RC=0
   gh_api -X DELETE "repos/$REPO/issues/$NUM/labels/$BOARD_PENDING_LABEL" >/dev/null \
     || UNLABEL_RC=$?
   UNLABEL_ERR="$(gh_api_err)"
-  # Read it whatever the DELETE's exit: a call can fail after the server
-  # applied it, and the fresh read, not the exit code, says what landed.
+  # Read it whatever the DELETE's exit: a call can fail after the server applied it.
   LABEL_AFTER_REMOVAL="$(issue_reply_label "$(gh_api "repos/$REPO/issues/$NUM")" "$BOARD_PENDING_LABEL")"
   if [ "$LABEL_AFTER_REMOVAL" = absent ]; then
     printf '  %-19s%s\n' "$BOARD_PENDING_LABEL" "removed"
   elif [ "$LABEL_AFTER_REMOVAL" = BAD ]; then
-    # COULD NOT LOOK, never "still there": offering a second DELETE here
-    # could remove a label that was added back since.
+    # COULD NOT LOOK, never "still there": a second DELETE could remove a label re-added since.
     echo "########################################################################" >&2
     echo "## WARNING: #$NUM is PLACED, but whether its $BOARD_PENDING_LABEL label is gone is UNKNOWN" >&2
     echo "########################################################################" >&2
@@ -1875,13 +1329,9 @@ fi
 echo
 DONE_VERB="$( [ "$MODE" = adopt ] && echo wired || echo created )"
 if [ "$CLOUD" -eq 1 ]; then
-  # Never "not on the board": a board can auto-add sub-issues at its bottom,
-  # and an adopted issue may already be placed. The run says only what it
-  # knows -- it did not look (#14 R14).
+  # Never "not on the board": it may be auto-added; say only that the run did not look (#14 R14).
   echo "#$NUM is $DONE_VERB and every relationship read back matching, but the board was not checked from the cloud. It may already be on it, at a spot nobody chose (sub-issues can be added to the bottom automatically). It carries the $BOARD_PENDING_LABEL label. $URL"
-  # Loud, and still exit 0, like the NOT SET notice below: everything a cloud
-  # session can write landed and read back. Placing it needs the board, so
-  # the command is for a local session; its position is the one answer left.
+  # Loud, exit 0: every cloud write landed; placing needs the board, so the command is for a local session.
   echo "########################################################################" >&2
   echo "## BOARD NOT CHECKED                                                   #" >&2
   echo "########################################################################" >&2
@@ -1896,10 +1346,7 @@ elif [ "$POSITION_DEGRADED" -eq 0 ]; then
   echo "#$NUM is $DONE_VERB and every relationship read back matching. $URL"
 else
   echo "#$NUM is $DONE_VERB and every relationship read back matching, but its board position is NOT SET. $URL"
-  # Loud, and still exit 0: everything this run could write landed and read
-  # back. What is left needs GraphQL, so the command below is for a session
-  # that has it. It is the adopt re-run, which writes only what is missing --
-  # here, the position -- and reads everything back.
+  # Loud, exit 0: every write landed; the position needs GraphQL, so the re-run is for a session that has it.
   echo "########################################################################" >&2
   echo "## BOARD POSITION NOT SET                                              #" >&2
   echo "########################################################################" >&2

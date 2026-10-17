@@ -45,16 +45,11 @@ TESTS = Path(__file__).resolve().parent
 REPO = TESTS.parent
 BOARD_SH = REPO / "board.sh"
 
-# The Photos-shaped config -- read from the actual shipped example, not a
-# hand-copied literal, so these tests prove the example.json itself drives
-# the same behavior the old hardcoded script did (U3's first scenario: "a
-# Photos-shaped config drives identical behavior to before").
+# Photos-shaped config, read from the shipped example so these tests prove the example drives the behavior.
 with open(REPO / "config.example.json", encoding="utf-8") as _fh:
     PHOTOS_CONFIG = json.load(_fh)
 
-# The Pluckd-shaped config -- a distinct vocabulary (work/bug/decision/
-# plan-parent, no your-run, project board #1, no Design-line requirement),
-# proving the schema is not over-fit to Photos' three shapes.
+# Pluckd-shaped config: a distinct vocabulary, proving the schema isn't over-fit to Photos.
 with open(TESTS / "fixtures" / "pluckd.config.json", encoding="utf-8") as _fh:
     PLUCKD_CONFIG = json.load(_fh)
 FILE_ISSUE = REPO / "file_issue.sh"
@@ -114,9 +109,7 @@ sys.stdout.write("{}")
 '''
 
 
-# The Status field's numeric id in the fake's fields listing. board.sh asks
-# for the field by this id, because the REST items endpoint's `fields`
-# parameter takes ids, not names (`fields=Status` is an HTTP 400).
+# Status field id; board.sh passes the id because the REST items endpoint rejects names (HTTP 400).
 STATUS_FIELD_ID = 77001
 FIELDS_WITH_STATUS = [
     {"id": 77000, "name": "Title", "data_type": "title"},
@@ -173,8 +166,7 @@ DEFAULT_BOARD = [
 
 GH_VERSION_LINE = "gh version 2.98.0 (2026-08-20)\n"
 
-# The duplicate check's open-issue listing, `GET repos/{repo}/issues?state=
-# open&per_page=100&page=N`. The listing includes pull requests.
+# The duplicate check's open-issue listing; it includes pull requests.
 TITLES_MATCH = "/issues?state=open"
 
 
@@ -191,9 +183,7 @@ def titles_pages(entries):
     return [json.dumps(p) for p in pages]
 
 
-# Every issue's numeric REST `id` in the fake: what the sub-issue and
-# dependency endpoints take, never the number. Offset so an id can never be
-# mistaken for a number, and so a test can turn one back into the other.
+# Numeric REST ids, offset from issue numbers so an id can't pass for a number.
 ISSUE_ID_BASE = 7000000
 
 
@@ -218,9 +208,7 @@ def issue_reply(n, state="open", body="", parent=None, labels=()):
     return d
 
 
-# The issues the tests name as a parent, a blocker or a blocked issue. Create
-# reads each once for its id before writing anything (#14 KTD3). No number
-# here is a prefix of another, because the fake matches on substrings.
+# No issue number here is a prefix of another, because the fake matches substrings.
 REFERENCED = (55, 63, 70, 77, 122, 133, 240)
 
 
@@ -247,8 +235,7 @@ GRAPHQL_BLOCKED_RULE = {
     "stderr": "gh: Resource not accessible by integration (HTTP 403)\n",
 }
 
-# How a Claude Code cloud session's GitHub proxy refuses the user-owned board
-# (measured 2026-10-16, #14): every `users/{owner}/projectsV2/...` path.
+# How a cloud session's GitHub proxy refuses the user-owned board's `users/{owner}/projectsV2/...` paths.
 BOARD_REFUSED_RULE = {
     "match": "projectsV2", "exit": 1, "stdout": "",
     "stderr": ("gh: This GitHub API path is not available: sessions are bound "
@@ -256,9 +243,7 @@ BOARD_REFUSED_RULE = {
                "endpoints (repos/{owner}/{repo}/...). (HTTP 403)\n"),
 }
 
-# The environment variable that turns cloud mode on (#14 KTD2). The harness
-# unsets it unless a test sets it, so a suite run inside a cloud session does
-# not turn every test into a cloud run (#14 KTD11).
+# Turns cloud mode on; the harness unsets it unless a test sets it, so a run inside a cloud session still works.
 CLOUD_ENV_VAR = "CLAUDE_CODE_REMOTE"
 CLOUD_ENV = {CLOUD_ENV_VAR: "true"}
 
@@ -283,9 +268,7 @@ class Harness:
         self.calls_log = self.dir / "calls.log"
         self.calls_log.write_text("")
         boards = [DEFAULT_BOARD] if boards is None else boards
-        # One single-page board per board READ, in order. `board_stdouts`
-        # replaces that with raw page replies, one per board-page CALL, which
-        # is how a test hands back a board that spans several pages.
+        # One single-page board per board read; `board_stdouts` gives raw replies per page call instead.
         pages = ([board_page(b) for b in boards] if board_stdouts is None
                  else list(board_stdouts))
         titles = titles_pages([{"number": n, "title": t} for n, t in boards[0]])
@@ -294,12 +277,9 @@ class Harness:
                       "stdouts": pages}
         if board_exits is not None:
             board_rule["exits"] = list(board_exits)
-        # `graphql_blocked` refuses every GraphQL call the way a session
-        # without GraphQL access does (#14 KTD10): exit 1, gh's `(HTTP 403)`
-        # suffix on stderr. It goes FIRST, so no other rule can answer one.
+        # `graphql_blocked` refuses every GraphQL call; it goes first so no other rule answers.
         table = [GRAPHQL_BLOCKED_RULE] if graphql_blocked else []
-        # `board_refused` answers every board path the way a cloud session's
-        # proxy does, ahead of the board rules below.
+        # `board_refused` answers every board path like a cloud proxy, ahead of the board rules.
         if board_refused:
             table.append(BOARD_REFUSED_RULE)
         table += [
@@ -573,8 +553,7 @@ class NeighbourCheck(unittest.TestCase):
         self.assertIn("164", r.stdout)
 
     def test_a_truncated_board_is_fatal(self):
-        # board.sh exits non-zero when rows != distinct. A truncated board is what
-        # hid #164 and produced the duplicate, so it must stop the run.
+        # board.sh exits non-zero when rows != distinct; a truncated board must stop the run.
         dupe = DEFAULT_BOARD + [DEFAULT_BOARD[0]]
         h = Harness("**Design:** none\n", boards=[dupe])
         r = h.run(*full_args(h.body_file), "--no-parent", "--top", "--dry-run")
@@ -591,14 +570,9 @@ PRE_BOARD = [
 ]
 
 
-# The REST board-half calls, as the fake matches them. Item-add is `POST
-# users/{owner}/projectsV2/{n}/items -f type=Issue -F id=<issue id>`; its rule
-# must come BEFORE the generic `-X POST` rule, which it also matches. The
-# single-item read the read-back corroborates with is `GET .../items/<id>`,
-# and nothing else carries `/items/`: the listing is `items?per_page=`.
+# Order matters: item-add must precede the generic `-X POST` rule; `/items/` appears only in the single-item read.
 ITEM_ADD_MATCH = "items -f type=Issue"
 ITEM_READ_MATCH = "/items/"
-# The position write is the one GraphQL call left (#14 KTD2).
 POSITION_MATCH = "updateProjectV2ItemPosition"
 
 
@@ -619,9 +593,7 @@ def item_read_rule(corroborate):
             "stderr": "gh: Not Found (HTTP 404)\n"}
 
 
-# The relationship read-back's three REST reads of #200 (#14 KTD6). The two
-# dependency lists come before the bare issue read, which is a substring of
-# both.
+# The dependency-list reads must precede the bare issue read, a substring of both.
 READ_BLOCKED_MATCH = "issues/200/dependencies/blocked_by?"
 READ_BLOCKING_MATCH = "issues/200/dependencies/blocking?"
 READ_ISSUE_MATCH = "issues/200"
@@ -732,8 +704,7 @@ class NoPromptOneRun(unittest.TestCase):
         self.assertTrue(h.created())
 
     def test_a_failed_duplicate_check_stops_rather_than_reading_as_none(self):
-        # With no prompt, DUPES is the stop's only input. A listing the
-        # checker cannot parse must not come out as "none found" and file.
+        # With no prompt, DUPES is the stop's only input; an unparseable listing must not read as "none found".
         h = self._harness()
         table = json.loads((h.dir / "responses.json").read_text())
         for rule in table:
@@ -765,8 +736,7 @@ class NoPromptOneRun(unittest.TestCase):
         return [c for c in h.calls() if any(TITLES_MATCH in a for a in c)]
 
     def test_a_pull_request_with_a_matching_title_is_not_a_duplicate(self):
-        # The REST listing of open issues includes pull requests. A PR is not
-        # an issue a new one could duplicate, so it never reaches the check.
+        # The REST listing includes pull requests; a PR is never a duplicate candidate.
         h = self._harness_with_listing([
             {"number": 300, "title": DUPE_TITLE,
              "pull_request": {"url": "https://api.github.com/repos/x/y/pulls/300"}},
@@ -794,8 +764,7 @@ class NoPromptOneRun(unittest.TestCase):
         self.assertIn("page=2", " ".join(calls[1]))
 
     def test_a_listing_at_the_limit_warns_that_matches_may_be_missed(self):
-        # Issue #17: the check reads at most 500 open issues. A full listing
-        # means there may be more, so the run says so, then files as before.
+        # The check reads at most 500 open issues; a full listing may hide more, so the run says so, then files.
         h = self._harness_with_open_issue_count(500)
         r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -804,9 +773,7 @@ class NoPromptOneRun(unittest.TestCase):
         self.assertTrue(h.created())
 
     def test_the_limit_counts_pull_requests_because_they_fill_the_same_pages(self):
-        # 500 raw entries, 100 of them pull requests: only 400 issues were
-        # checked, and the listing still stopped at the limit with more
-        # possibly unread.
+        # 500 raw entries, 100 of them PRs: 400 issues checked, and the listing stopped at the limit.
         entries = [{"number": 1000 + i, "title": f"Unrelated open issue {i}"}
                    for i in range(400)]
         entries += [{"number": 2000 + i, "title": f"A pull request {i}",
@@ -883,7 +850,6 @@ class ReadBack(unittest.TestCase):
         self.assertIn("blocks             ok (63)", out)
 
     def test_blocked_by_mismatch_fails_loudly(self):
-        # Requested --blocked-by 122, but the read-back comes back empty.
         h = self._harness(blocked_by=[])
         r = h.run(
             "--title", "A brand new distinct piece of work",
@@ -908,7 +874,7 @@ class ReadBack(unittest.TestCase):
         self.assertIn("blocks", (r.stdout + r.stderr).lower())
 
     def test_parent_mismatch_fails_loudly(self):
-        h = self._harness(parent=None)  # asked for #55, server says none
+        h = self._harness(parent=None)
         r = h.run(
             "--title", "A brand new distinct piece of work",
             "--body-file", str(h.body_file), "--shape", "work",
@@ -919,7 +885,6 @@ class ReadBack(unittest.TestCase):
         self.assertIn("parent", (r.stdout + r.stderr).lower())
 
     def test_board_position_mismatch_fails_loudly(self):
-        # Asked for --after 101; the board reads back with 102 in front instead.
         wrong = [
             (101, "First thing on the board"),
             (102, "Second thing"),
@@ -931,12 +896,7 @@ class ReadBack(unittest.TestCase):
         self.assertIn("position", (r.stdout + r.stderr).lower())
 
     def test_a_board_that_auto_adds_new_issues_does_not_half_wire_the_create(self):
-        # A board with GitHub's auto-add workflow puts the new issue on it
-        # before item-add runs, and item-add then refuses with "Content
-        # already exists in this project". pluckd #504 and #508 both came back
-        # HALF-WIRED this way. The id must come from the board listing, re-read
-        # after item-add fails, since the pre-write listing predates the issue
-        # (#14 KTD5).
+        # Auto-add boards the issue first, so item-add refuses; the id must come from a fresh listing.
         responses = override(create_responses([], []), ITEM_ADD_MATCH, exit=1,
                              stderr="gh: Content already exists in this "
                                     "project (HTTP 422)\n")
@@ -1016,8 +976,7 @@ class CapabilityProbe(unittest.TestCase):
         return h, r, r.stdout + r.stderr
 
     def test_a_fake_with_no_flag_probe_answers_proceeds(self):
-        # The fake answers only `--version`; a `--help` or bare
-        # `issue view --json` call would get `{}` back and refuse.
+        # The fake answers only `--version`; any other call gets `{}` and refuses.
         h, r, out = self._run(probe_rules())
         self.assertEqual(r.returncode, 0, out)
         self.assertIn("2.98.0", r.stdout, "the version is still printed")
@@ -1178,7 +1137,6 @@ class RestWritePath(unittest.TestCase):
             self.assertNotEqual(["issue", "create"], call[:2], call)
             self.assertNotEqual(["issue", "list"], call[:2], call)
             if "graphql" in joined:
-                # The position write is the only call left on GraphQL.
                 self.assertIn(POSITION_MATCH, joined, call)
 
     def test_the_relationship_read_back_is_three_rest_reads(self):
@@ -1207,14 +1165,7 @@ class RestWritePath(unittest.TestCase):
         self.assertFalse([c for c in h.calls() if c[:2] == ["issue", "view"]])
 
 
-# ---------------------------------------------------------------------------
-# ADOPT MODE
-#
-# Wiring an issue that ALREADY EXISTS goes through the same tool, the same four
-# required placement answers and the same read-back as creating one. What it
-# must NOT do is reconcile: an existing link that contradicts an answer stops
-# the run and prints the command that clears it.
-# ---------------------------------------------------------------------------
+# ADOPT MODE: same placement answers and read-back, but a contradicting link stops the run with the clearing command.
 
 ADOPT_NUM = "200"
 ADOPT_URL = "https://github.com/jffriend/photo-consolidation/issues/200"
@@ -1262,8 +1213,7 @@ def adopt_responses(pre_parent=None, pre_blocked=(), pre_blocking=(),
         {"match": ITEM_ADD_MATCH,
          "stdout": json.dumps(item_reply(200, node_id="PVTI_from_item_add"))},
         {"match": "-X POST", "stdout": "{}", "exit": write_exit},
-        # The label removal (#14 U4) names `issues/200`, so it must be
-        # answered before the issue read below.
+        # The label removal names `issues/200`, so it must be matched before the issue read.
         {"match": "-X DELETE", "stdout": "", "exit": delete_exit,
          "stderr": "" if delete_exit == 0 else "gh: Server Error (HTTP 500)\n"},
         {"match": POSITION_MATCH, "stdout": json.dumps({"data": {}})},
@@ -1273,8 +1223,7 @@ def adopt_responses(pre_parent=None, pre_blocked=(), pre_blocking=(),
         {"match": READ_BLOCKING_MATCH,
          "stdouts": [dependency_list(pre_blocking), dependency_list(post_blocking)]},
         {"match": READ_ISSUE_MATCH,
-         # A third reply, when given, answers the fresh read after a label
-         # removal, so a test can tell it from the stale read-back reply.
+         # A third reply answers the fresh read after a label removal, distinct from the stale read-back reply.
          "stdouts": [issue_stdout,
                      json.dumps(issue_reply(ADOPT_NUM, state=state, body=body,
                                             parent=post_parent,
@@ -1421,9 +1370,7 @@ class AdoptGate(unittest.TestCase):
         self.assertTrue(wrote_nothing(h))
 
     def test_a_parentless_issue_has_no_parent_key_and_reads_as_no_parent(self):
-        # GitHub OMITS parent_issue_url on a parentless issue (measured
-        # 2026-10-15). Absent is a legal answer, so adopt must read it as "no
-        # parent" and write the one asked for.
+        # GitHub omits parent_issue_url on a parentless issue; absent means no parent, so adopt writes the asked-for one.
         h = adopt_harness(post_parent="55")
         self.assertNotIn("parent_issue_url",
                          issue_reply(ADOPT_NUM), "precondition: key absent")
@@ -1433,8 +1380,7 @@ class AdoptGate(unittest.TestCase):
                          link_writes(h))
 
     def test_an_issue_reply_without_number_and_state_refuses(self):
-        # {"message": ...} is a reply whose every field extracts as absent,
-        # and absent is a legal parent answer. Only its shape tells it apart.
+        # {"message": ...} extracts as every field absent, a legal parent answer; only its shape tells it apart.
         h = adopt_harness(issue_stdout=json.dumps({"message": "Not Found"}))
         r = h.run(*adopt_args(), "--no-parent", "--top")
         self.assertEqual(1, r.returncode, r.stdout + r.stderr)
@@ -1529,8 +1475,7 @@ class AdoptContradiction(unittest.TestCase):
         self.assertTrue(wrote_nothing(h))
 
     def test_unnamed_blocks_links_refuse_and_name_the_clearing_command(self):
-        # A blocks link is the blocked issue's blocked-by link, so it is
-        # cleared against #63, by #200's id.
+        # A blocks link is the blocked issue's blocked-by link, so it is cleared on #63 using #200's id.
         h = adopt_harness(pre_blocking=[63])
         r = h.run(*adopt_args(), "--no-parent", "--after", "101")
         self.assertNotEqual(r.returncode, 0)
@@ -1541,9 +1486,7 @@ class AdoptContradiction(unittest.TestCase):
         self.assertTrue(wrote_nothing(h))
 
     def test_an_unnamed_blocks_link_into_another_repo_is_cleared_in_that_repo(self):
-        # Dependency lists carry issues from other repos too (measured
-        # 2026-10-15: this repo's #14 blocks jffriend/pluckd#577). The link
-        # lives on the blocked issue, so the remedy must name ITS repo.
+        # Dependency lists include other repos' issues; the link lives on the blocked issue, so the remedy names its repo.
         blocking = json.dumps([{
             "number": 577, "id": 5872918136,
             "repository_url": "https://api.github.com/repos/jffriend/pluckd"}])
@@ -1642,9 +1585,7 @@ class AdoptDelta(unittest.TestCase):
         self.assertIn("blocks             ok (63)", out)
 
     def test_a_partially_applied_edit_is_caught_and_not_reported_as_nothing_written(self):
-        # Every write exits non-zero, yet the parent landed and the blocker
-        # did not. "It exited non-zero" is not evidence that nothing was
-        # written, so the read-back is what decides.
+        # Every write exits non-zero, yet the parent landed and the blocker didn't; the read-back decides.
         h = adopt_harness(post_parent="55", post_blocked=[], write_exit=1)
         r = h.run("--adopt", ADOPT_NUM, "--parent", "55", "--after", "101",
                   "--blocked-by", "122", "--blocks", "none")
@@ -1721,10 +1662,7 @@ class AdoptReadBack(unittest.TestCase):
         self.assertIn("parent", (r.stdout + r.stderr).lower())
 
     def test_an_issue_already_on_the_board_takes_its_item_id_from_the_listing(self):
-        # item-add cannot answer this: the create path takes the id from
-        # item-add's output and refuses when it is empty, which for an issue
-        # already on the board would abort a correctly wired filing. The
-        # pre-write listing carries the item's node id (#14 KTD5).
+        # item-add can't answer for an issue already on the board; the pre-write listing carries its node id.
         h = adopt_harness()
         r = h.run(*adopt_args(), "--no-parent", "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -1738,8 +1676,7 @@ class AdoptReadBack(unittest.TestCase):
         self.assertIn("board position     ok (after #101)", r.stdout)
 
     def test_an_issue_not_on_the_board_is_item_added(self):
-        # An adopted issue that is not on the board yet: the listing has no
-        # row for it, so item-add puts it there.
+        # An adopted issue not yet on the board has no listing row, so item-add puts it there.
         off_board = [(101, "First thing on the board"), (102, "Second thing")]
         top_board = [
             (200, "An existing issue being wired"),
@@ -1765,19 +1702,12 @@ class AdoptReadBack(unittest.TestCase):
         self.assertNotIn("Nothing was created", out)
 
 
-# ---------------------------------------------------------------------------
-# ONE IMPLEMENTATION (R8, R9, R24)
-#
-# Three different guards, because one is not enough: a text scan catches a
-# verbatim copy, an equivalence test catches a paraphrase, a parity test
-# catches a mode that writes a different relationship set.
-# ---------------------------------------------------------------------------
+# ONE IMPLEMENTATION (R8, R9, R24): text scan, equivalence and parity tests catch copies, paraphrases and drift.
 
 READ_BACK_START = "# >>> SHARED READ-BACK START"
 READ_BACK_END = "# <<< SHARED READ-BACK END"
 
-# Tokens that exist only to compare a relationship against its answer. Every
-# one of them must live inside the marked block and nowhere else.
+# Tokens that only compare a relationship to its answer; each must appear only inside the marked block.
 COMPARISON_TOKENS = (
     "BOARD2_NUMS", "IDX2", "REL_JSON", "PARENT_READ",
     "BLOCKED_READ", "BLOCKED_WANT", "BLOCKING_READ", "BLOCKING_WANT",
@@ -1809,8 +1739,7 @@ def scan_for_duplicated_comparisons(path):
            {t for t in COMPARISON_TOKENS if t in block}
 
 
-# The two shared functions take NO arguments and read the globals $NUM/$URL,
-# so their call sites are the bare function name and nothing else.
+# The shared functions take no arguments, so call sites are the bare function name.
 CURRENT_SHELL_CALL_SITES = ("read_back", "board_half")
 
 
@@ -1851,7 +1780,6 @@ class OneImplementation(unittest.TestCase):
         text = FILE_ISSUE.read_text()
         head, rest = text.split(READ_BACK_START, 1)
         block, tail = rest.split(READ_BACK_END, 1)
-        # A verbatim copy-paste of one comparison, back outside the block.
         copied = '\nPARENT_READ="$(printf %s "$REL_JSON" | jq -r .parent.number)"\n'
         tmp = Path(tempfile.mkdtemp()) / "copy.sh"
         tmp.write_text(head + READ_BACK_START + block + READ_BACK_END
@@ -1969,9 +1897,7 @@ class BehaviouralEquivalence(unittest.TestCase):
 
     @staticmethod
     def _same_config(h, r):
-        # Each harness has its own temp --config path, and the re-verify
-        # command prints it. That is the one difference that is not the
-        # read-back's, so it is named out before comparing.
+        # Each harness has its own temp --config path in the re-verify command; strip it before comparing.
         r.stderr = r.stderr.replace(str(h.config_path), "<config>")
         return r
 
@@ -2141,13 +2067,7 @@ class Usage(unittest.TestCase):
                            "the help must not be truncated")
 
 
-# ---------------------------------------------------------------------------
-# U3. The board write is not read-your-writes consistent. Four correctly wired
-# filings were declared HALF-WIRED because the listing was read before it had
-# caught up, and the refusal told the operator to delete the issue. These
-# tests pin the three-state resolution: not yet visible, did not land, could
-# not look.
-# ---------------------------------------------------------------------------
+# U3: the board write isn't read-your-writes; these pin not yet visible, did not land and could not look.
 
 BOARD_WITHOUT_200 = [
     (101, "First thing on the board"),
@@ -2415,15 +2335,7 @@ class ReadBackRetry(unittest.TestCase):
         self.assertNotIn("delete", out.replace("Do not delete", ""))
 
 
-# ---------------------------------------------------------------------------
-# THE 2026-08-24 REVIEW OF THE READ-BACK CHANGE.
-#
-# Every test below reproduces a defect a reviewer found in the change that was
-# meant to stop the read-back raising FALSE alarms. Two shapes recur, and they
-# are the two this whole script is bounded against: an UNCLEARABLE REFUSAL (a
-# correctly wired issue told to delete itself) and a VACUOUS PASS (a guard that
-# cannot fail). Several of these were the second shape arriving by a new route.
-# ---------------------------------------------------------------------------
+# Read-back defects come as an unclearable refusal or a vacuous pass.
 
 
 def override(responses, match, **fields):
@@ -2530,8 +2442,7 @@ class ReadBackProvesSomething(unittest.TestCase):
         self.assertIn("parent", out)
 
     def test_a_parentless_reply_with_no_parent_key_passes_a_no_parent_filing(self):
-        # GitHub OMITS parent_issue_url on a parentless issue (measured
-        # 2026-10-15), so an absent key is "no parent", not "could not look".
+        # GitHub omits parent_issue_url on a parentless issue, so an absent key means no parent, not could-not-look.
         self.assertNotIn("parent_issue_url", issue_reply(200), "precondition")
         r, out = self._run()
         self.assertEqual(0, r.returncode, out)
@@ -2783,8 +2694,7 @@ class BoardHalfOverRest(unittest.TestCase):
         self.assertNotIn("NOT SET", r.stdout + err)
 
     def test_corroboration_reads_the_item_item_add_returned(self):
-        # The listing never shows #200; the single-item read by item-add's
-        # numeric id is what proves membership.
+        # The listing never shows #200; the single-item read by item-add's id proves membership.
         h, r = self._run(create_responses([], [], corroborate=True),
                          boards=[PRE_BOARD, BOARD_WITHOUT_200])
         self.assertEqual(1, r.returncode, r.stdout + r.stderr)
@@ -2792,8 +2702,7 @@ class BoardHalfOverRest(unittest.TestCase):
         self.assertTrue(h.called("api", "users/jffriend/projectsV2/2/items/900200"))
 
     def test_a_corroborating_item_that_names_another_issue_proves_nothing(self):
-        # A reply that is the wrong item, or not an item at all, must not read
-        # as membership.
+        # A reply that is the wrong item, or not an item, must not read as membership.
         for reply in (item_reply(201), {"message": "Not Found"}):
             with self.subTest(reply=reply):
                 responses = override(create_responses([], []), ITEM_READ_MATCH,
@@ -2825,7 +2734,6 @@ class DegradedPosition(unittest.TestCase):
         return h, h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
 
     def test_a_degraded_create_proves_membership_and_says_not_set(self):
-        # #200 landed at the bottom, not after #101: no position mismatch.
         h, r = self._create()
         self.assertEqual(0, r.returncode, r.stdout + r.stderr)
         self.assertIn("board membership   ok", r.stdout)
@@ -2875,9 +2783,7 @@ class DegradedPosition(unittest.TestCase):
         self.assertIn("--adopt 200 --no-parent --after 101", r.stderr)
 
     def test_a_degraded_adopt_already_in_place_proves_the_position(self):
-        # #200 already follows #102 on ADOPT_PRE_BOARD, so nothing has to
-        # move: a refused position write changes nothing, and the read-back
-        # proves the position instead of reporting it NOT SET.
+        # #200 already follows #102, so nothing moves; the read-back proves the position.
         responses = override(adopt_responses(), POSITION_MATCH, **POSITION_403)
         h = Harness("**Design:** none\n",
                     boards=[ADOPT_PRE_BOARD, ADOPT_PRE_BOARD],
@@ -2939,10 +2845,6 @@ class AbsentRefusalWording(unittest.TestCase):
         self.assertIn("--adopt 200", out)
         self.assertNotIn("delete", out.replace("Do not delete", ""))
 
-    # F11b (test_the_workflow_doc_qualifies_the_dry_run_duplicate_check) is
-    # intentionally left behind here: it asserted that Photos' own
-    # docs/WORKFLOW.md documents the --dry-run/create-mode gating, which is a
-    # Photos documentation-conformance check, not coverage of this script.
 
 
 class AdoptDisclosesTheMove(unittest.TestCase):
@@ -2956,7 +2858,6 @@ class AdoptDisclosesTheMove(unittest.TestCase):
     """
 
     def test_the_summary_names_the_current_slot_and_says_it_moves(self):
-        # #200 sits third on ADOPT_PRE_BOARD, following #102.
         h = adopt_harness()
         r = h.run(*adopt_args(), "--no-parent", "--after", "101", "--dry-run")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -3025,8 +2926,6 @@ class AdoptRecordsTheMove(unittest.TestCase):
     """
 
     def test_a_move_posts_one_comment_naming_both_slots(self):
-        # #200 sits third on ADOPT_PRE_BOARD following #102, and lands second
-        # on ADOPT_POST_BOARD following #101.
         h = adopt_harness()
         r = h.run(*adopt_args(), "--no-parent", "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -3042,30 +2941,19 @@ class AdoptRecordsTheMove(unittest.TestCase):
         self.assertIn("move recorded      ok", r.stdout)
 
     def test_the_comment_says_who_wrote_it_and_why(self):
-        # The first line of the body carries the two slots. Everything AFTER
-        # that first line is what makes the comment interpretable by someone
-        # reading #200 months later with no memory of this run: it names the
-        # tool that wrote it, the board it was wiring onto, and the reason the
-        # record exists at all. Until the call log stopped truncating multi-
-        # line arguments, no assertion could see past that first line, so this
-        # whole trailer could have been deleted from the script with every
-        # test still passing.
+        # The call log must see past the first line, or the trailer could be deleted unnoticed.
         h = adopt_harness()
         r = h.run(*adopt_args(), "--no-parent", "--after", "101")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         body = comment_body(comment_calls(h)[0])
         self.assertIn("Recorded automatically by", body)
         self.assertIn("scripts/file_issue.sh", body)
-        # PROJECT_NUMBER in the script -- the board this issue was wired onto.
         self.assertIn("project 2", body)
         self.assertIn("recoverable", body)
-        # And the trailer is genuinely on its own line, below the summary --
-        # proof the logged argument survived the newline rather than being
-        # reassembled from fragments.
+        # The trailer sits on its own line below the summary, so the logged argument kept its newline.
         self.assertGreater(len(body.splitlines()), 1, body)
 
     def test_a_position_that_does_not_change_posts_nothing(self):
-        # Asking for the slot it already holds: still third, still after #102.
         h = adopt_harness(boards=[ADOPT_PRE_BOARD, ADOPT_PRE_BOARD])
         r = h.run(*adopt_args(), "--no-parent", "--after", "102")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -3073,8 +2961,7 @@ class AdoptRecordsTheMove(unittest.TestCase):
         self.assertIn("does NOT move it", position_line(r.stdout))
 
     def test_an_issue_not_yet_on_the_board_posts_nothing_and_succeeds(self):
-        # No origin slot exists, so there is nothing to record -- and the run
-        # must not trip over the absent one.
+        # No origin slot exists, so nothing is recorded and the run must not trip on it.
         off_board = [(101, "First thing on the board"), (102, "Second thing")]
         h = adopt_harness(boards=[off_board, ADOPT_POST_BOARD])
         r = h.run(*adopt_args(), "--no-parent", "--after", "101")
@@ -3115,9 +3002,7 @@ class AdoptRecordsTheMove(unittest.TestCase):
         self.assertNotIn("following # ", body)
 
     def test_a_position_that_never_verifies_posts_no_comment(self):
-        # The board comes back with #200 still following #102 after a run that
-        # asked for #101, which is the half-wired path. A comment claiming a
-        # move that did not land is worse than no comment.
+        # #200 still follows #102 after asking for #101; a comment claiming a move that didn't land is worse than none.
         h = adopt_harness(boards=[ADOPT_PRE_BOARD, ADOPT_PRE_BOARD])
         r = h.run(*adopt_args(), "--no-parent", "--after", "101")
         self.assertNotEqual(r.returncode, 0)
@@ -3125,9 +3010,7 @@ class AdoptRecordsTheMove(unittest.TestCase):
         self.assertIn("board position", r.stdout + r.stderr)
 
     def test_a_failed_comment_warns_with_both_slots_and_still_exits_zero(self):
-        # The wiring landed and read back correct. A failed comment must not
-        # tell the operator to delete a correctly wired issue, and must not
-        # fail the run -- but it must be impossible to miss.
+        # The wiring landed: a failed comment must not offer delete or fail the run, but must be impossible to miss.
         h = Harness(
             "**Design:** none\n",
             boards=[ADOPT_PRE_BOARD, ADOPT_POST_BOARD],
@@ -3141,17 +3024,10 @@ class AdoptRecordsTheMove(unittest.TestCase):
         self.assertIn("WARNING", err)
         self.assertIn("position 3 (following #102)", err)
         self.assertIn("position 2 (following #101)", err)
-        # WHY it failed is the only thing that tells the operator whether to
-        # retry now or wait: gh's own stderr, and the exit code it came with.
-        # Both reach the operator through one line in the script, and without
-        # these two assertions dropping the `2>&1` capture would break nothing.
+        # gh's stderr and exit code tell the operator whether to retry; these assertions keep the `2>&1` capture.
         self.assertIn("HTTP 502", err)
         self.assertIn("exited 1", err)
-        # The half-wired remedies, absent -- asserted by the sentences the
-        # `half_wired*` functions actually print, not by the bare word
-        # "delete". `MOVE_ERR` interpolates real gh stderr into this same
-        # stream, so a future gh message containing "delete" would otherwise
-        # fail this test for a reason that has nothing to do with the remedy.
+        # Assert on half_wired's sentences, not the word "delete", since MOVE_ERR can contain gh stderr.
         self.assertNotIn("MISMATCH:", err)
         self.assertNotIn("and re-run. Do not assume it is fine.", err)
         self.assertNotIn("Do not delete #200", err)
@@ -3160,9 +3036,7 @@ class AdoptRecordsTheMove(unittest.TestCase):
         self.assertIn("#200 is wired", r.stdout)
 
     def test_create_mode_posts_nothing_and_trips_no_unset_variable(self):
-        # Create mode never runs the latching branch, so every variable the
-        # move record reads must carry a default or `set -u` kills the run on
-        # the commonest filing shape.
+        # Create mode skips the latching branch, so the move record's variables need defaults under `set -u`.
         board_after = [
             (101, "First thing on the board"),
             (200, "A brand new distinct piece of work"),
@@ -3236,17 +3110,7 @@ class FakeGhRuleOrder(unittest.TestCase):
                     self.assertLess(post, i, rule["match"])
 
 
-# ---------------------------------------------------------------------------
-# U3. The generalized, config-driven engine.
-#
-# ConfigValidation: a config with zero shapes, or a shape referencing an
-# undefined label, must refuse with a clear offline error rather than a
-# silent default (U3 edge case). PluckdConfig: a Pluckd-shaped config drives
-# correct behavior against a genuinely distinct vocabulary (AE2), proving the
-# schema is not over-fit to Photos' three shapes. BoardShIntegration:
-# board.sh's config-driven query still emits the unchanged self-check line
-# to stderr (U3's integration scenario).
-# ---------------------------------------------------------------------------
+# U3: the config-driven engine: bad configs refuse offline and a Pluckd config proves no over-fit (AE2).
 
 class ConfigValidation(unittest.TestCase):
     """R2/KTD5: the config schema is validated offline, before any network
@@ -3308,8 +3172,7 @@ class ConfigValidation(unittest.TestCase):
         return h
 
     def test_human_review_required_absent_is_accepted(self):
-        # Covers AE4: a missing key means true. The skill, not the engine,
-        # acts on it; the engine only has to accept it.
+        # Covers AE4: a missing key means true; the engine only has to accept it.
         h = Harness("**Design:** none\n")
         cfg = {k: v for k, v in PHOTOS_CONFIG.items() if k != "human_review_required"}
         h.config_path.write_text(json.dumps(cfg))
@@ -3335,9 +3198,7 @@ class ConfigValidation(unittest.TestCase):
         self.assertFalse(h.created())
 
     def test_human_review_required_non_boolean_values_refuse(self):
-        # The string "true" is the one a value check (rather than a type
-        # check) would let through; null is the one jq's `//` would read as
-        # absent.
+        # The string "true" slips past a value check; null is what jq's `//` reads as absent.
         for value in ("true", "false", "required", "optional", None, 1, 0, [], {}):
             with self.subTest(value=value):
                 h = self._review_config(value)
@@ -3354,9 +3215,7 @@ class PluckdConfig(unittest.TestCase):
     ITS repo -- not Photos'."""
 
     def test_filing_a_bug_shaped_issue_uses_pluckds_repo_and_label(self):
-        # The read-back re-reads the board, so the SECOND page must already
-        # carry the new issue (#200) -- the same shape ReadBack._harness uses
-        # -- or a correctly wired filing would fail its own read-back.
+        # The second page must already carry #200, or a correctly wired filing fails its own read-back.
         board_after = [
             (101, "First thing on the board"),
             (200, "A Pluckd bug"),
@@ -3376,8 +3235,7 @@ class PluckdConfig(unittest.TestCase):
         self.assertIsNotNone(create_call)
         self.assertEqual("repos/jffriend/pluckd/issues", create_call[3])
         self.assertIn("labels[]=bug", create_call)
-        # "needs-joe" is Photos-only vocabulary; it must not leak into a
-        # config that never defined it.
+        # "needs-joe" is Photos-only vocabulary and must not leak into a config that never defined it.
         self.assertNotIn("labels[]=needs-joe", create_call)
 
     def test_your_run_is_not_a_recognized_shape_under_pluckds_config(self):
@@ -3393,9 +3251,7 @@ class PluckdConfig(unittest.TestCase):
         self.assertIn("work, bug, decision, plan-parent", out)
 
     def test_a_plan_derived_body_does_not_require_a_parent_when_the_config_does_not_require_it(self):
-        # Pluckd's config sets design_line_required=false, so a body whose
-        # Design: field links into plan_dir must NOT trigger the parenting
-        # refusal the way it would under Photos' config.
+        # Pluckd sets design_line_required=false, so a plan_dir Design: link must not trigger the parenting refusal.
         body = (
             "Some body.\n\n**Design:** [U1](https://github.com/jffriend/pluckd/"
             "blob/main/docs/plans/2026-01-01-001-feat-x.md#u1)\n"
@@ -3419,7 +3275,7 @@ class BoardShIntegration(unittest.TestCase):
         return env
 
     def test_the_self_check_line_is_emitted_to_stderr(self):
-        h = Harness("**Design:** none\n")  # sets up the fake gh + a config
+        h = Harness("**Design:** none\n")
         out_path = h.dir / "board_out.json"
         r = subprocess.run(
             ["bash", str(BOARD_SH), "--config", str(h.config_path), str(out_path)],
@@ -3490,8 +3346,7 @@ class BoardOverRest(unittest.TestCase):
                   "--dry-run")
         out = r.stdout + r.stderr
         self.assertEqual(r.returncode, 0, out)
-        # --after 103 sits on the seam: its neighbours above come from page 1
-        # and its neighbours below from page 2, in board order.
+        # --after 103 sits on the seam: neighbours above come from page 1, below from page 2.
         seen = [out.index("#%d " % n) for n, _ in self.PAGE1 + self.PAGE2]
         self.assertEqual(sorted(seen), seen, out)
         self.assertLess(out.index("#103 "), out.index("NEW ISSUE HERE"))
@@ -3512,7 +3367,6 @@ class BoardOverRest(unittest.TestCase):
         self.assertIn("pages=2 rows=6 distinct=6", r.stderr)
 
     def test_repeated_pages_are_a_truncated_board(self):
-        # The cursor did not advance: the same page came back twice.
         h = Harness("**Design:** none\n",
                     board_stdouts=[board_page(self.PAGE1, next_cursor="CUR2"),
                                    board_page(self.PAGE1)])
@@ -3534,8 +3388,7 @@ class BoardOverRest(unittest.TestCase):
         self.assertIn("not trustworthy", out)
 
     def test_a_page_that_is_not_an_item_array_fails_the_run(self):
-        # An empty or object-shaped body would otherwise count as zero rows,
-        # and a truncated board reads exactly like a short one.
+        # An empty or object body would count as zero rows, and a truncated board reads as a short one.
         h = Harness("**Design:** none\n",
                     board_stdouts=["HTTP/2.0 200 OK\n\r\n"
                                    + json.dumps({"message": "Not an array"})])
@@ -3556,8 +3409,7 @@ class BoardOverRest(unittest.TestCase):
         self.assertIn("carries no cursor", out)
 
     def test_a_pull_request_on_the_board_is_not_a_row(self):
-        # The GraphQL listing read a pull request as numberless and dropped
-        # it; the REST listing numbers it, so the row filter is by type.
+        # The REST listing numbers pull requests, so rows are filtered by type.
         page = json.loads(board_page(self.PAGE1).split("\r\n\r\n", 1)[1])
         page.append({"id": 1, "node_id": "PVTI_pr", "content_type": "PullRequest",
                      "content": {"number": 150, "title": "A pull request"},
@@ -3698,12 +3550,7 @@ class GraphQLBlocked(unittest.TestCase):
         self.assertFalse([c for c in self.h.calls() if "graphql" in " ".join(c)])
 
 
-# ---------------------------------------------------------------------------
-# #14 cloud mode. A Claude Code cloud session's proxy refuses the user-owned
-# board, so cloud mode (CLAUDE_CODE_REMOTE=true, or --no-board) never reads or
-# writes it: the position is decided later, the issue carries the needs-board
-# label, and everything the run wrote is read back.
-# ---------------------------------------------------------------------------
+# #14 cloud mode (CLAUDE_CODE_REMOTE=true or --no-board) never touches the board; the issue gets the needs-board label.
 
 PENDING_LABEL = "needs-board"
 
@@ -3840,8 +3687,7 @@ class NoBoardNeedsTheProxyRefusal(unittest.TestCase):
         self.assertIn("labels[]=%s" % PENDING_LABEL, create)
 
     def test_a_half_wired_no_board_run_hands_back_no_board(self):
-        # The recovery command is re-run from the same session, which still
-        # has no environment signal, so it must carry --no-board too.
+        # The recovery command re-runs where no environment signal is set, so it must carry --no-board.
         h = Harness("**Design:** none\n", board_refused=True,
                     responses=cloud_create_responses())
         r = h.run(*full_args(h.body_file), "--parent", "55", "--no-board",
@@ -3905,8 +3751,6 @@ class CloudModeSkipsTheBoard(unittest.TestCase):
         self.assertEqual([], touched_the_board(h))
 
     def test_a_cloud_refusal_hands_back_a_command_the_cloud_accepts(self):
-        # Asked for a parent that does not read back: half-wired, with the
-        # adopt re-run as its remedy.
         r = self._create(parent=("--parent", "55"))
         self.assertEqual(1, r.returncode, r.stdout + r.stderr)
         self.assertIn("--position-later", r.stderr)
@@ -3943,8 +3787,7 @@ class CloudModeLabel(unittest.TestCase):
         self.assertIn("blocks             ok (122)", r.stdout)
         self.assertIn("needs-board        ok (present)", r.stdout)
         self.assertIn("#200 is created", r.stdout)
-        # Project 3 auto-adds sub-issues, so "not on the board" could be
-        # false: the run says only what it knows (#14 R14).
+        # Project 3 auto-adds sub-issues, so the run says only what it knows, never "not on the board".
         self.assertIn("the board was not checked", r.stdout)
         self.assertIn("may already be on it", r.stdout)
         self.assertNotIn("NOT on the board", r.stdout)
@@ -4041,9 +3884,7 @@ class LocalPlacementClearsTheLabel(unittest.TestCase):
         return self.h.run(*adopt_args(), "--no-parent", "--after", "101", *extra)
 
     def test_placing_a_labeled_issue_removes_the_label_and_proves_it(self):
-        # Covers AE5. The read-back reply still shows the label, as it would
-        # just before the DELETE; only the fresh read after it shows it gone,
-        # so this fails if the removal is judged from the stale reply.
+        # Covers AE5. Only the fresh read shows the label gone, so this fails if removal is judged from the stale reply.
         r = self._adopt(pre_labels=(PENDING_LABEL,), post_labels=(PENDING_LABEL,),
                         after_delete_stdout=json.dumps(issue_reply(ADOPT_NUM)))
         self.assertEqual(0, r.returncode, r.stdout + r.stderr)
@@ -4071,8 +3912,7 @@ class LocalPlacementClearsTheLabel(unittest.TestCase):
         self.assertNotIn("needs-board        removed", r.stdout)
 
     def test_a_delete_that_fails_but_landed_reads_back_removed(self):
-        # The DELETE exits non-zero but GitHub applied it: the fresh read is
-        # what decides, so no second DELETE is offered.
+        # The DELETE exits non-zero but GitHub applied it; the fresh read decides, so no second DELETE is offered.
         r = self._adopt(pre_labels=(PENDING_LABEL,), post_labels=(PENDING_LABEL,),
                         delete_exit=1,
                         after_delete_stdout=json.dumps(issue_reply(ADOPT_NUM)))

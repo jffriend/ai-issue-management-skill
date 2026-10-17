@@ -58,7 +58,6 @@ class DesignField(unittest.TestCase):
 
     def test_heading_style_design_field_is_found(self):
         body = "## Design\n\nnone\n"
-        # A `## Design` heading with the value on the next line still resolves.
         self.assertIsNotNone(T.design_field(body))
 
     def test_absent_design_field_is_none(self):
@@ -103,7 +102,6 @@ class PlanDerived(unittest.TestCase):
         self.assertFalse(T.is_plan_derived(body, self.PLAN_DIR))
 
     def test_docs_plans_elsewhere_in_the_body_does_not_count(self):
-        # Only the Design: field decides. A mention in prose is not a design link.
         body = "The units live in docs/plans/ somewhere.\n\n**Design:** none\n"
         self.assertFalse(T.is_plan_derived(body, self.PLAN_DIR))
 
@@ -220,8 +218,7 @@ class ProseOrdering(unittest.TestCase):
         self.assertEqual(T.states_prose_ordering(body), [])
 
     def test_an_indefinite_within_task_step_is_not_ordering(self):
-        # #171: "before any snapshot-taking run" is a checklist step inside this
-        # task, not an order between two issues.
+        # #171: "before any snapshot-taking run" is a checklist step, not an order between issues.
         body = (
             "A line is added to the pre-run checklist requiring free space on the "
             "SSD to be checked before any snapshot-taking run."
