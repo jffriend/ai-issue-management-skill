@@ -1236,7 +1236,8 @@ def adopt_responses(pre_parent=None, pre_blocked=(), pre_blocking=(),
                     state="open", body="**Design:** none\n",
                     issue_stdout=None, write_exit=0,
                     corroborate="", blocked_stdout=None,
-                    pre_labels=(), post_labels=(), delete_exit=0):
+                    pre_labels=(), post_labels=(), delete_exit=0,
+                    after_delete_stdout=None):
     """Canned replies for an adopt run.
 
     The PRE-FETCH and the READ-BACK read the same three REST paths -- the
@@ -1272,10 +1273,14 @@ def adopt_responses(pre_parent=None, pre_blocked=(), pre_blocking=(),
         {"match": READ_BLOCKING_MATCH,
          "stdouts": [dependency_list(pre_blocking), dependency_list(post_blocking)]},
         {"match": READ_ISSUE_MATCH,
+         # A third reply, when given, answers the fresh read after a label
+         # removal, so a test can tell it from the stale read-back reply.
          "stdouts": [issue_stdout,
                      json.dumps(issue_reply(ADOPT_NUM, state=state, body=body,
                                             parent=post_parent,
-                                            labels=post_labels))]},
+                                            labels=post_labels))]
+                    + ([] if after_delete_stdout is None
+                       else [after_delete_stdout])},
         *referenced_issue_rules(),
     ]
 
@@ -3701,9 +3706,6 @@ class GraphQLBlocked(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 PENDING_LABEL = "needs-board"
-# Stands in for the body file in an argument list built before the harness
-# that owns the file exists; CloudModeLabel._cloud swaps it in.
-BODY = object()
 
 
 def cloud_create_responses(post_labels=("work", PENDING_LABEL), blocked_by=(),
@@ -3870,18 +3872,20 @@ class CloudModeLabel(unittest.TestCase):
     proven by the read-back, and the run says it is not on the board (R8, R9,
     R12, R14)."""
 
-    def _cloud(self, responses, *args):
-        """Runs in cloud mode; a BODY argument becomes the harness's body file."""
+    def _cloud(self, responses, *args, create=None):
+        """Runs in cloud mode. `create`, a dict of full_args overrides, puts a
+        create run's arguments first, built against this harness's body file."""
         self.h = Harness("**Design:** none\n", board_refused=True,
                          responses=responses)
-        args = [str(self.h.body_file) if a == str(BODY) else a for a in args]
+        if create is not None:
+            args = (*full_args(self.h.body_file, **create), *args)
         return self.h.run(*args, env=CLOUD_ENV)
 
     def test_a_cloud_create_sends_the_label_in_the_create_and_reads_it_back(self):
         # Covers AE1.
         r = self._cloud(cloud_create_responses(parent=55, blocking=(122,)),
-                        *full_args(BODY, **{"--blocks": "122"}),
-                        "--parent", "55", "--position-later")
+                        "--parent", "55", "--position-later",
+                        create={"--blocks": "122"})
         self.assertEqual(0, r.returncode, r.stdout + r.stderr)
         create = create_argv(self.h)
         self.assertIn("labels[]=work", create)
@@ -3921,8 +3925,7 @@ class CloudModeLabel(unittest.TestCase):
 
     def test_a_label_missing_after_a_cloud_create_is_refused(self):
         r = self._cloud(cloud_create_responses(post_labels=("work",)),
-                        *full_args(BODY), "--no-parent",
-                        "--position-later")
+                        "--no-parent", "--position-later", create={})
         self.assertEqual(1, r.returncode, r.stdout + r.stderr)
         self.assertIn(PENDING_LABEL, r.stderr)
         self.assertIn("absent", r.stderr)
@@ -3933,8 +3936,7 @@ class CloudModeLabel(unittest.TestCase):
         del reply["labels"]
         r = self._cloud(override(cloud_create_responses(), READ_ISSUE_MATCH,
                                  stdout=json.dumps(reply)),
-                        *full_args(BODY), "--no-parent",
-                        "--position-later")
+                        "--no-parent", "--position-later", create={})
         self.assertEqual(1, r.returncode, r.stdout + r.stderr)
         self.assertIn("unrecognised shape", r.stderr)
         self.assertNotIn("needs-board        ok", r.stdout)
@@ -3960,8 +3962,11 @@ class LocalPlacementClearsTheLabel(unittest.TestCase):
         return self.h.run(*adopt_args(), "--no-parent", "--after", "101", *extra)
 
     def test_placing_a_labeled_issue_removes_the_label_and_proves_it(self):
-        # Covers AE5.
-        r = self._adopt(pre_labels=(PENDING_LABEL,), post_labels=())
+        # Covers AE5. The read-back reply still shows the label, as it would
+        # just before the DELETE; only the fresh read after it shows it gone,
+        # so this fails if the removal is judged from the stale reply.
+        r = self._adopt(pre_labels=(PENDING_LABEL,), post_labels=(PENDING_LABEL,),
+                        after_delete_stdout=json.dumps(issue_reply(ADOPT_NUM)))
         self.assertEqual(0, r.returncode, r.stdout + r.stderr)
         deletes = label_deletes(self.h)
         self.assertEqual(1, len(deletes), deletes)
@@ -3984,6 +3989,27 @@ class LocalPlacementClearsTheLabel(unittest.TestCase):
         self.assertEqual(1, len(label_deletes(self.h)))
         self.assertIn("gh api -X DELETE repos/jffriend/photo-consolidation/"
                       "issues/200/labels/%s" % PENDING_LABEL, r.stderr)
+        self.assertNotIn("needs-board        removed", r.stdout)
+
+    def test_a_delete_that_fails_but_landed_reads_back_removed(self):
+        # The DELETE exits non-zero but GitHub applied it: the fresh read is
+        # what decides, so no second DELETE is offered.
+        r = self._adopt(pre_labels=(PENDING_LABEL,), post_labels=(PENDING_LABEL,),
+                        delete_exit=1,
+                        after_delete_stdout=json.dumps(issue_reply(ADOPT_NUM)))
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertIn("needs-board        removed", r.stdout)
+        self.assertNotIn("gh api -X DELETE", r.stderr)
+
+    def test_an_unreadable_fresh_read_says_unknown_and_offers_no_delete(self):
+        unreadable = json.dumps({"message": "Server Error"})
+        r = self._adopt(pre_labels=(PENDING_LABEL,), post_labels=(PENDING_LABEL,),
+                        after_delete_stdout=unreadable)
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertIn("UNKNOWN", r.stderr)
+        self.assertNotIn("gh api -X DELETE", r.stderr)
+        self.assertIn("gh api repos/jffriend/photo-consolidation/issues/200",
+                      r.stderr)
         self.assertNotIn("needs-board        removed", r.stdout)
 
     def test_an_unlabeled_issue_gets_no_label_removal(self):

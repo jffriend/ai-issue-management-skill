@@ -114,9 +114,6 @@
 #   --dry-run stops after the board neighbourhood, the duplicate check and the
 #   summary. Nothing is created and nothing is changed.
 #
-#   --no-board turns on cloud mode in any session. --position-later is the
-#   cloud-mode position answer and is refused outside cloud mode.
-#
 #   BODIES AND COMMENTS. This script never edits the body of an issue that
 #   already exists — adopt refuses --body-file for that reason. But the rule
 #   about bodies binds anything that comments on an issue, so it is stated
@@ -1076,15 +1073,25 @@ reverify_command() {
   #
   # In cloud mode it is re-run from the same cloud session, which refuses
   # --after and --top, so it carries --position-later (#14 KTD10).
+  #
+  # $1, when given, replaces the position answer: the cloud notice prints the
+  # command a LOCAL session runs, whose position is still to be chosen.
+  local position="${1-}"
+  if [ -z "$position" ]; then
+    if [ "$CLOUD" -eq 1 ]; then
+      position="--position-later"
+      [ "$NO_BOARD" -eq 1 ] && position="--no-board $position"
+    elif [ "$TOP" -eq 1 ]; then
+      position="--top"
+    else
+      position="--after $AFTER"
+    fi
+  fi
   printf '  bash %q --config %q --adopt %s %s %s --blocked-by %s --blocks %s\n' \
     "${BASH_SOURCE[0]}" "$CONFIG" \
     "$NUM" \
     "$( [ -n "$PARENT" ] && printf -- '--parent %s' "$PARENT" || printf -- '--no-parent' )" \
-    "$( if [ "$CLOUD" -eq 1 ]; then
-          [ "$NO_BOARD" -eq 1 ] && printf -- '--no-board '
-          printf -- '--position-later'
-        elif [ "$TOP" -eq 1 ]; then printf -- '--top'
-        else printf -- '--after %s' "$AFTER"; fi )" \
+    "$position" \
     "$( [ -n "$BLOCKED_LIST" ] && csv_of "$BLOCKED_LIST" || printf 'none' )" \
     "$( [ -n "$BLOCKS_LIST" ] && csv_of "$BLOCKS_LIST" || printf 'none' )"
 }
@@ -1789,12 +1796,23 @@ if [ "$MODE" = adopt ] && [ "$CLOUD" -eq 0 ] && [ "$POSITION_DEGRADED" -eq 0 ] \
   gh_api -X DELETE "repos/$REPO/issues/$NUM/labels/$BOARD_PENDING_LABEL" >/dev/null \
     || UNLABEL_RC=$?
   UNLABEL_ERR="$(gh_api_err)"
-  LABEL_AFTER_REMOVAL=""
-  if [ "$UNLABEL_RC" -eq 0 ]; then
-    LABEL_AFTER_REMOVAL="$(issue_reply_label "$(gh_api "repos/$REPO/issues/$NUM")" "$BOARD_PENDING_LABEL")"
-  fi
+  # Read it whatever the DELETE's exit: a call can fail after the server
+  # applied it, and the fresh read, not the exit code, says what landed.
+  LABEL_AFTER_REMOVAL="$(issue_reply_label "$(gh_api "repos/$REPO/issues/$NUM")" "$BOARD_PENDING_LABEL")"
   if [ "$LABEL_AFTER_REMOVAL" = absent ]; then
     printf '  %-19s%s\n' "$BOARD_PENDING_LABEL" "removed"
+  elif [ "$LABEL_AFTER_REMOVAL" = BAD ]; then
+    # COULD NOT LOOK, never "still there": offering a second DELETE here
+    # could remove a label that was added back since.
+    echo "########################################################################" >&2
+    echo "## WARNING: #$NUM is PLACED, but whether its $BOARD_PENDING_LABEL label is gone is UNKNOWN" >&2
+    echo "########################################################################" >&2
+    echo "#$NUM is correctly wired and every relationship read back matching."   >&2
+    echo "Nothing is half-wired and there is nothing here to undo. The label"     >&2
+    echo "DELETE exited $UNLABEL_RC${UNLABEL_ERR:+ ($UNLABEL_ERR)}, and the read that would" >&2
+    echo "confirm it did not come back as an issue. Check it by hand:"            >&2
+    echo "  gh api repos/$REPO/issues/$NUM --jq '[.labels[].name]'"              >&2
+    echo "########################################################################" >&2
   else
     echo "########################################################################" >&2
     echo "## WARNING: #$NUM is PLACED but its $BOARD_PENDING_LABEL label was NOT removed" >&2
@@ -1827,11 +1845,7 @@ if [ "$CLOUD" -eq 1 ]; then
   echo "position. It carries the $BOARD_PENDING_LABEL label so it can be found. Place it" >&2
   echo "from a local session, choosing --after <N> or --top there; the adopt run" >&2
   echo "writes only what is missing, reads everything back, and removes the label:" >&2
-  printf '  bash %q --config %q --adopt %s %s (--after N | --top) --blocked-by %s --blocks %s\n' \
-    "${BASH_SOURCE[0]}" "$CONFIG" "$NUM" \
-    "$( [ -n "$PARENT" ] && printf -- '--parent %s' "$PARENT" || printf -- '--no-parent' )" \
-    "$( [ -n "$BLOCKED_LIST" ] && csv_of "$BLOCKED_LIST" || printf 'none' )" \
-    "$( [ -n "$BLOCKS_LIST" ] && csv_of "$BLOCKS_LIST" || printf 'none' )" >&2
+  reverify_command "(--after N | --top)" >&2
   echo "########################################################################" >&2
 elif [ "$POSITION_DEGRADED" -eq 0 ]; then
   echo "#$NUM is $DONE_VERB and every relationship read back matching. $URL"
