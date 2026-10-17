@@ -95,10 +95,10 @@
 #   labels the issue needs-board. It reads all of that back, prints the two
 #   board lines as "not checked (cloud mode)", and ends with a notice that the
 #   board was not checked: the issue may already be on it at a spot nobody
-#   chose, since sub-issues can be added automatically. --dry-run shows the duplicate check and the
-#   summary; there is no board neighbourhood. Place the issue later with a
-#   local adopt naming --after N or --top; once that placement reads back,
-#   the adopt removes the needs-board label.
+#   chose, since sub-issues can be added automatically. --dry-run shows the
+#   duplicate check and the summary; there is no board neighbourhood. Place
+#   the issue later with a local adopt naming --after N or --top; once that
+#   placement reads back, the adopt removes the needs-board label.
 #
 #   WHERE ONLY GRAPHQL IS REFUSED. Every call goes over GitHub's REST API
 #   except the board-position write, which has no REST route. In a session
@@ -658,7 +658,10 @@ if [ "$CLOUD_UNCONFIRMED" -eq 1 ]; then
        the position against it: drop --no-board and --position-later and pass
        --after <N> or --top. $NOTHING"
   fi
-  if ! grep -qF "$CLOUD_PROXY_REFUSAL" "$BOARD_ERR"; then
+  # Both the proxy's phrase and gh's 403 suffix, so no other failure whose
+  # text happens to quote the phrase can pass for the refusal.
+  if ! grep -qF "$CLOUD_PROXY_REFUSAL" "$BOARD_ERR" \
+     || ! grep -qF "(HTTP 403)" "$BOARD_ERR"; then
     board_untrusted
     exit 1
   fi
