@@ -231,7 +231,9 @@ came from in a comment on the issue once the read-back proves the move.
 
 Run the command **with `--dry-run` appended**. It prints the board
 neighbourhood, the possible duplicates (create mode only), and the summary,
-and writes nothing.
+and writes nothing. In cloud mode there is no neighbourhood (the preview says
+it is not available) and the summary gives the position as `decided later`;
+tell the caller so, rather than asking them to check a position.
 
 ```bash
 {{FILE_ISSUE_CMD}} <the arguments you built> --dry-run
@@ -254,7 +256,11 @@ preview, show that output to the caller and wait again.
 ### Either setting
 
 If the board listing cannot be trusted, the engine stops rather than filing
-against a partial board. Never work around that refusal, or any other.
+against a partial board. Never work around that refusal, or any other. There
+is one named exception: a board read refused with the cloud proxy's
+"sessions are bound to their configured repositories" message is answered by
+re-running with `--no-board` (see "Filing from a cloud session"). Nothing else
+is.
 
 ### Filing from a cloud session
 
@@ -271,13 +277,15 @@ turns on **cloud mode** by itself; the first line of its output then starts
 - The dry run shows the duplicate check and the summary, but no board
   neighbourhood.
 
-If a run in a cloud session does **not** print that `cloud mode` line and
-instead stops with "the board listing is not trustworthy" and "sessions are
-bound to their configured repositories", the environment signal was missing.
-Re-run the same command with `--no-board` and `--position-later` added in
-place of the position. That is the only time to add `--no-board`: never add it
-to get past that refusal anywhere else, because there it means the board
-listing is broken, not out of reach.
+The one trigger for `--no-board` is the cloud proxy's refusal. If a run stops
+with "the board listing is not trustworthy" **and** its message contains
+"sessions are bound to their configured repositories", the environment signal
+was missing. Re-run the same command with `--no-board` and `--position-later`
+in place of the position. The engine reads the board once more and turns cloud
+mode on only if the proxy refuses it again; if the board reads fine it refuses
+`--no-board`. Any other "not trustworthy" message means the board listing is
+broken, not out of reach: never add `--no-board` for it. This is the one
+exception to "never work around a refusal".
 
 ## Step 4 — exit 3: possible duplicates
 
@@ -303,7 +311,8 @@ their answer.
 The engine reads every relationship back after writing and prints a
 `READ-BACK` block: board membership, board position, parent, blocked-by,
 blocks. In cloud mode the two board lines say `not checked (cloud mode)` and a
-`needs-board` line follows the others.
+`needs-board` line follows the others; report the position as decided later,
+never as set.
 
 **Quote those lines.** Do not assert that the filing succeeded — an exit code
 is not evidence that a write landed. Report position and dependencies as
@@ -323,13 +332,23 @@ tell the caller it failed
 and that you posted it by hand. Never treat a zero exit as evidence the move
 record landed.
 
-**A cloud-mode filing ends `NOT on the board yet`, and that is the outcome to
-report, not a failure.** It exits 0 once everything it wrote reads back, and a
-`NOT ON THE BOARD YET` notice prints the local adopt command that places it.
-Quote the read-back and that notice to the caller, and say plainly that the
-issue is not on the board and carries the `needs-board` label until it is
-placed from a local session. Do not try to place it from the cloud session by
-any other route.
+**A cloud-mode filing ends saying the board was not checked, and that is the
+outcome to report, not a failure.** It exits 0 once everything it wrote reads
+back, and a `BOARD NOT CHECKED` notice prints the local adopt command that
+places it. Quote the read-back and that notice to the caller. Say plainly that
+the board was not checked from the cloud, that the issue may already be on it
+at a spot nobody chose (a board can add sub-issues to its bottom
+automatically), and that it carries the `needs-board` label until it is placed
+from a local session. Relay the notice's command exactly as printed, with its
+`(--after N | --top)` left for the caller to choose: do not pick a position
+for them. Do not try to place it from the cloud session by any other route.
+
+**If the `needs-board` label reads back absent**, the run stops half-wired and
+prints the adopt command that adds it. Fix it with that command and nothing
+else; do not add the label by hand or with any other call. If the label still
+does not land, the repo may not have it yet: tell the caller it may need
+creating once (`gh label create needs-board`) from a session that can, then
+re-run the printed command.
 
 **In adopt mode, a local placement of a `needs-board` issue removes the
 label.** Once the position reads back, the engine prints `needs-board
@@ -363,4 +382,6 @@ covers filing.
   has approved the verbatim preview.
 - Pass `--file-anyway` without having read every listed match.
 - Work around any refusal the engine raises. Every one of them was paid for.
+  The one named exception: re-running with `--no-board` after a board read
+  refused with "sessions are bound to their configured repositories".
 - Restate the engine's flags from memory instead of reading its usage.
