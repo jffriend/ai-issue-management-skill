@@ -1695,12 +1695,12 @@ class AdoptReadBack(unittest.TestCase):
     OFF_BOARD = [(101, "First thing on the board"), (102, "Second thing")]
     TOP_BOARD = [(200, "An existing issue being wired")] + OFF_BOARD
 
-    def _already_added(self, boards, project_items=None, corroborate=""):
+    def _already_added(self, boards, project_items=None, corroborate="",
+                       add_stderr="gh: Content already exists in this "
+                                  "project (HTTP 422)\n"):
         # The listing lags a fresh add: item-add refuses with 422 and the listing doesn't show #200.
         responses = override(adopt_responses(corroborate=corroborate),
-                             ITEM_ADD_MATCH, exit=1,
-                             stderr="gh: Content already exists in this "
-                                    "project (HTTP 422)\n")
+                             ITEM_ADD_MATCH, exit=1, stderr=add_stderr)
         if project_items is None:
             project_items = {"stdout": json.dumps({"data": {"repository": {"issue": {
                 "projectItems": {"nodes": [
@@ -1742,7 +1742,39 @@ class AdoptReadBack(unittest.TestCase):
         self.assertIn("#200 is already on the board", r.stderr)
         self.assertIn("HTTP 502", r.stderr)
         self.assertIn("The READ failed", r.stderr)
+        self.assertNotIn("PARTLY WIRED", r.stderr)
         self.assertNotIn("by hand", r.stderr)
+        self.assertFalse(h.called(POSITION_MATCH))
+
+    def test_an_issue_item_only_on_another_project_after_a_422_is_refused(self):
+        h, r = self._already_added(
+            [self.OFF_BOARD],
+            project_items={"stdout": json.dumps({"data": {"repository": {"issue": {
+                "projectItems": {"nodes": [
+                    {"id": "PVTI_other_project", "databaseId": 1,
+                     "project": {"id": "PVT_someone_else"}},
+                ]}}}}})})
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        self.assertIn("#200 is already on the board", r.stderr)
+        self.assertNotIn("PARTLY WIRED", r.stderr)
+        self.assertNotIn("by hand", r.stderr)
+        self.assertFalse(h.called(POSITION_MATCH))
+
+    def test_a_listing_and_item_read_both_behind_after_a_422_say_re_run(self):
+        h, r = self._already_added([self.OFF_BOARD])
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        self.assertIn("Membership is PROVEN", r.stderr)
+        self.assertIn("--adopt 200", r.stderr, "the re-run command is printed")
+        self.assertNotIn("WITHOUT error", r.stderr)
+        self.assertNotIn("PARTLY WIRED", r.stderr)
+        self.assertNotIn("by hand", r.stderr)
+
+    def test_an_add_failing_for_another_reason_is_not_read_as_membership(self):
+        h, r = self._already_added([self.OFF_BOARD],
+                                   add_stderr="gh: Bad Gateway (HTTP 502)\n")
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        self.assertIn("did not return an item id", r.stderr)
+        self.assertFalse(h.called("projectItems"))
         self.assertFalse(h.called(POSITION_MATCH))
 
     def test_an_adopt_failure_never_says_a_create_happened(self):
