@@ -39,6 +39,8 @@ Joe keeps the board to active work and places issues himself, so a cloud filing 
 ### Key Decisions
 
 - **Detect cloud mode from the session's environment, with `--no-board` as the fallback.** A bad local token must still stop the run rather than quietly file off-board. (session-settled: user-directed — chosen over a flag alone, switching on a refused board read at start, and a config key: an environment signal removes cloud friction without giving the untrusted-board stop an exemption.) Governs R1, R2, R3.
+- **`--no-board` unlocks cloud mode only after the cloud proxy itself refuses the board.** Review found that a flag honoured in any session let a local run get past "the board listing is not trustworthy". (session-settled: user-directed — chosen over keeping it in any session, keeping it with a loud warning, and dropping the flag: closes the bypass and keeps the fallback for a cloud session without the environment signal.) Governs R2, R3.
+- **Every cloud run says the board was not checked, never that the issue is off it.** Project 3 auto-adds sub-issues at the bottom, and an adopted issue may already be placed, so "not on the board" can be false. (session-settled: user-directed — chosen over "NOT on the board yet" everywhere and over splitting by no-parent create: the line stays true on any consumer's board.) Governs R14.
 - **The handoff is the `needs-board` label alone.** (session-settled: user-directed — chosen over GitHub's project auto-add workflow, auto-add plus label, and a label plus a local placement command: Joe keeps the board to active work and places issues by hand; the local command is deferred.) Governs R8, R9, R15.
 - **The position answer is deferred, not guessed.** A cloud agent cannot see the board, so any position it gave would be blind. (session-settled: user-directed — chosen over requiring `--after`/`--top` as recorded intent, and over recorded intent with a mandatory local re-confirm.) Governs R5, R6, R7.
 - **The label goes on in the same write that creates the issue.** A cloud-filed issue can then never exist without it. (session-settled: user-directed — Joe's proposal, chosen over a separate label write after create.) Governs R8.
@@ -51,7 +53,7 @@ Joe keeps the board to active work and places issues himself, so a cloud filing 
 **Entering cloud mode**
 
 - R1. Cloud mode turns on before any network call when the session's environment identifies a Claude Code cloud session.
-- R2. `--no-board` turns cloud mode on in any session.
+- R2. `--no-board` turns cloud mode on only when the board read is refused with the cloud proxy's "sessions are bound to their configured repositories" message. Any other board failure stops the run as R3 says, and a board that reads fine refuses `--no-board`.
 - R3. Outside cloud mode, a refused or unreadable board still stops the run exactly as today; no network failure switches a run into cloud mode.
 - R4. A cloud-mode run says near the top of its output that it is in cloud mode and which of R1 or R2 turned it on.
 
@@ -72,7 +74,7 @@ Joe keeps the board to active work and places issues himself, so a cloud filing 
 
 - R12. Read-back stays mandatory in cloud mode: parent, blocked-by, blocks and the `needs-board` label are each read back and compared, with the same shape checks and three-state outcome as today.
 - R13. In cloud mode the board-membership and board-position read-back lines say "not checked (cloud mode)", never "ok".
-- R14. A cloud run whose writes all read back matching exits 0, and its closing line says plainly that the issue is not on the board and carries `needs-board`, followed by a notice that it must be placed from a local session.
+- R14. A cloud run whose writes all read back matching exits 0. Its closing line says the board was not checked from the cloud, that the issue may already be on it at a spot nobody chose (sub-issues can be auto-added at the bottom), and that it carries `needs-board`; a notice says to place it from a local session.
 
 **Clearing the label**
 
@@ -81,7 +83,7 @@ Joe keeps the board to active work and places issues himself, so a cloud filing 
 
 **Agent instructions and docs**
 
-- R17. `SKILL.template.md` tells an agent that in a cloud session it gives the "decided later" position answer; that if the board read is refused with the cloud proxy's "sessions are bound to their configured repositories" message, it re-runs with `--no-board`; that it quotes the read-back and the not-on-the-board notice to the caller; and that it never reaches the board any other way.
+- R17. `SKILL.template.md` tells an agent that in a cloud session it gives the "decided later" position answer; that if the board read is refused with the cloud proxy's "sessions are bound to their configured repositories" message, it re-runs with `--no-board`, the one named exception to "never work around a refusal"; that in cloud mode a preview shows no neighbourhood and the position is reported as decided later; that it relays the notice's `(--after N | --top)` command with the position left to the caller; that a missing `needs-board` label is fixed only with the command the engine prints; that it quotes the read-back and the notice to the caller; and that it never reaches the board any other way.
 - R18. The user docs describe cloud mode, what it can and cannot do, the `needs-board` label, and how a labeled issue gets placed locally.
 
 ### Acceptance Examples
@@ -89,7 +91,7 @@ Joe keeps the board to active work and places issues himself, so a cloud filing 
 - AE1. Cloud filing succeeds. **Covers R1, R5, R8, R12, R13, R14.**
   - **Given:** a cloud session, a new title with no duplicates, a parent, and `--blocked-by none --blocks N` for an open issue N in this repo.
   - **When:** the agent runs create mode with the "decided later" position answer.
-  - **Then:** the issue exists with its shape label and `needs-board`; parent, blocks and the label read back ok; board membership and position read "not checked (cloud mode)"; the closing line says it is not on the board; exit 0.
+  - **Then:** the issue exists with its shape label and `needs-board`; parent, blocks and the label read back ok; board membership and position read "not checked (cloud mode)"; the closing line says the board was not checked and the issue may already be on it; exit 0.
 - AE2. Position given in cloud mode. **Covers R6.**
   - **Given:** a cloud session.
   - **When:** the agent passes `--after 12`.
@@ -120,7 +122,7 @@ Joe keeps the board to active work and places issues himself, so a cloud filing 
 
 ### Scope Boundaries
 
-- Deferred: a local command that lists every `needs-board` issue and places them. Not filed for now; Joe places labeled issues himself.
+- Deferred: a local command that lists every `needs-board` issue ready to place, filed as #24 (blocked by #14).
 - Not built: GitHub's project auto-add workflow.
 - Not built: attaching other repos to a cloud session, or any cross-repo link write.
 - Separate: board Status and other board fields (#9, #7); cross-repo same-number matching (#22, blocked by #14); reading past 500 open issues in the duplicate check (#19).
