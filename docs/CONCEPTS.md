@@ -124,7 +124,7 @@ The position is the one placement answer cloud mode can't give honestly, because
 
 ### Board Position Degrades Instead of Failing
 
-Every call this tool makes goes over GitHub's REST API, except one: setting an issue's board position. GitHub has no REST route for that, so it uses GraphQL. Some sessions reach the board over REST but refuse GraphQL calls. (A Claude Code cloud session is refused the board itself, so it uses cloud mode, above.)
+Every call this tool makes goes over GitHub's REST API, except two. One sets an issue's board position, which has no REST route. The other runs only when adding the issue to the board fails because it is already there but the board listing hasn't shown it yet: it reads the issue's board item from the issue itself. Both use GraphQL. Some sessions reach the board over REST but refuse GraphQL calls. (A Claude Code cloud session is refused the board itself, so it uses cloud mode, above.)
 
 When GitHub refuses the position write with HTTP 403, the tool does not call the issue half-wired. The issue exists, it is on the board, and every other relationship read back matching. Only its position is wrong. So the run exits 0, the read-back says `board position NOT SET`, and a loud notice prints the adopt command that places it from a session where GraphQL works. That command is safe on a correctly wired issue: it writes only what is missing and reads everything back.
 

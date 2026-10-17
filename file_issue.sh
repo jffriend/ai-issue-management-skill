@@ -840,6 +840,7 @@ half_wired_absent() {
 
 half_wired_unverified() {
   # POSITION UNVERIFIED: membership is proven, but the listing never caught up to show position; not a failed write.
+  [ "$MODE" = adopt ] && HALF_WIRED_PROVENANCE="Its wiring is not yet verified, and nothing here proved any of it wrong."
   half_wired_head "$1"
   printf 'Membership is PROVEN: a direct read of the board item of #%s returned it on\n' "$NUM" >&2
   printf 'project %s. Only the POSITION is unverified — the board listing was\n' "$PROJECT_NUMBER" >&2
@@ -853,6 +854,7 @@ half_wired_unverified() {
 
 half_wired_unreadable() {
   # COULD NOT LOOK: the read failed, not the write; not being able to look is not evidence of absence.
+  [ "$MODE" = adopt ] && HALF_WIRED_PROVENANCE="Its wiring is not yet verified, and nothing here proved any of it wrong."
   half_wired_head "$1"
   printf 'The READ failed, not the write. Nothing here says the write did not land, and\n' >&2
   printf 'no relationship was proven wrong. Re-run the check once the board reads again:\n' >&2
@@ -974,6 +976,7 @@ fi
 ITEM_ID=""             # the item's node id, which the position write takes
 ITEM_REST_ID=""        # its numeric REST id, which the single-item read takes
 POSITION_DEGRADED=0    # 1 once GitHub has refused the position write (#14 KTD2)
+ADD_PROVED_MEMBER=0    # 1 once item-add refused with "already exists", which proves membership
 
 board_row_item() {
   # Prints the issue's "<node id>\t<numeric id>" from board rows $1, or nothing if it isn't a row.
@@ -1034,6 +1037,15 @@ board_half() {
     rows="$(read_board "${BOARD_JSON}.2")" \
       || half_wired_unreadable "the board (project $PROJECT_NUMBER) could not be re-read to find the item for #$NUM"
     take_item "$(board_row_item "$rows" "$NUM")"
+  fi
+  # A 422 "already exists" proves membership while the listing lags; the issue's own projectItems carries the item.
+  if [ -z "$ITEM_ID" ] && printf '%s' "$add_err" | grep -qF "Content already exists"; then
+    ADD_PROVED_MEMBER=1
+    take_item "$(gh_api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){projectItems(first:100){nodes{id databaseId project{id}}}}}}' \
+      -f o="${REPO%%/*}" -f r="${REPO#*/}" -F n="$NUM" \
+      | jq -r --arg p "$PROJECT_ID" '.data.repository.issue.projectItems.nodes[]? | select(.project.id == $p) | "\(.id)\t\(.databaseId)"' 2>/dev/null \
+      | head -1)" \
+      || { add_err="$(gh_api_err)"; half_wired_unreadable "#$NUM is already on the board (project $PROJECT_NUMBER), but its board item could not be read${add_err:+ ($add_err)}"; }
   fi
   [ -n "$ITEM_ID" ] || half_wired "the board (project $PROJECT_NUMBER) did not return an item id for #$NUM${add_err:+ ($add_err)}"
 
@@ -1126,16 +1138,19 @@ read_back_board() {
   done
 
   if [ "$POSITION_DEGRADED" -eq 1 ]; then
-    # No position was written, so membership is the whole verdict.
-    [ "$member_proven" -eq 1 ] \
-      || half_wired_absent "#$NUM is not on the board (project $PROJECT_NUMBER) after being added to it"
+    # No position was written, so membership is the whole verdict; the 422 predates the read-back, so it only explains silence.
+    if [ "$member_proven" -eq 0 ]; then
+      [ "$ADD_PROVED_MEMBER" -eq 1 ] \
+        && half_wired_unverified "board membership of #$NUM could not be re-read — item-add said it is already on the board, but the board listing never showed it"
+      half_wired_absent "#$NUM is not on the board (project $PROJECT_NUMBER) after being added to it"
+    fi
   else
     # Read the latch only if no attempt saw the right position: proven wrong, then silent, is not UNVERIFIED.
     if [ "$position_ok" -eq 0 ] && [ "$position_proven_wrong" -eq 1 ]; then
       half_wired "$position_msg"
     fi
     if [ "$in_listing" -eq 0 ]; then
-      if [ "$member_proven" -eq 1 ]; then
+      if [ "$member_proven" -eq 1 ] || [ "$ADD_PROVED_MEMBER" -eq 1 ]; then
         half_wired_unverified "board position for #$NUM could not be verified — #$NUM is on the board, but the board listing never showed it"
       fi
       half_wired_absent "#$NUM is not on the board (project $PROJECT_NUMBER) after being added to it"
