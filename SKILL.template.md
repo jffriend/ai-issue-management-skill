@@ -75,20 +75,29 @@ than a small fix, or needs a decision you cannot make here.
 
 ## The one rule
 
-Do not create or edit an issue, and do not touch the project board, with the
-GitHub CLI directly. Not `gh issue create`, not `gh issue edit`, not any
+Do not create an issue, and do not set where one sits, with the GitHub CLI
+directly. Where an issue sits is its board membership and position, its
+parent, and its blocked-by and blocks links. Not `gh issue create`, not
+`gh issue edit` with `--parent` or a blocked-by or blocking flag, not any
 `gh project` command, and not their `gh api` equivalents. They write what
 you asked for and stop, leaving every other relationship for a later step
 that may not come. That is not a style preference — it is the reason this tool exists: a written rule alone did not
 hold, in a session that had just read it.
 
 This skill never writes to the board itself. It drives the engine, and the
-engine does every write.
+engine does every placement write. The one exception is a command the
+engine prints for you to run, such as the `gh api -X DELETE` that clears a
+link adopt refused.
 
-**One exception, named so it does not have to be guessed at.** Posting a
-*comment* on an issue is permitted, because a comment creates no issue and
-touches no board field. Post it over REST, which works in a cloud session
-where `gh issue comment` does not:
+**Editing an existing issue's title, body or labels is outside this rule**
+until the engine supports those edits. Follow {{CONVENTIONS_DOC}} for them.
+Two limits stay: do not add or remove the `needs-board` label by hand
+(Step 5 says how it is handled), and do not change a shape's labels on an
+issue the engine filed.
+
+**Comments are permitted too, named so it does not have to be guessed at.**
+A comment creates no issue and touches no board field. Post it over REST,
+which works in a cloud session where `gh issue comment` does not:
 
 ```bash
 gh api -X POST repos/<owner>/<repo>/issues/<N>/comments -F body=@comment.md
@@ -96,7 +105,7 @@ gh api -X POST repos/<owner>/<repo>/issues/<N>/comments -F body=@comment.md
 
 `<owner>/<repo>` is the `repo` value in {{CONFIG_PATH}}. Step 4 uses a
 comment to add details to an issue that already covers the work. The ban
-covers creating an issue, editing one, and touching the project board.
+covers creating an issue and setting where it sits.
 
 ## Before you comment: does the comment correct the body?
 
@@ -112,8 +121,7 @@ record with *where they disagree with the body, the body wins.*
 
 This engine cannot do that edit: adopt mode refuses `--body-file`, because an
 issue that already exists has a body. So the body edit is a direct
-REST call, the one issue write this skill sends you elsewhere for, rather
-than the one it lets you skip:
+REST call, which works in a cloud session too:
 
 ```bash
 gh api -X PATCH repos/<owner>/<repo>/issues/<N> -F body=@body.md
