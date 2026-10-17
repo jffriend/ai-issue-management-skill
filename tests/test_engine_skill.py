@@ -33,10 +33,7 @@ TESTS = Path(__file__).resolve().parent
 REPO = TESTS.parent
 FILE_ISSUE = REPO / "file_issue.sh"
 
-# --------------------------------------------------------------------------
-# Reading. Raises rather than returning an empty result: an unreadable file is
-# not evidence that the script is clean.
-# --------------------------------------------------------------------------
+# Raises rather than returning empty: an unreadable file is not evidence the script is clean.
 
 def read_or_raise(path, scan_name):
     """Return the file's text, or raise naming the scan that wanted it.
@@ -54,29 +51,13 @@ def read_or_raise(path, scan_name):
             "Unable to look is not permission." % (scan_name, path, exc)) from exc
 
 
-# --------------------------------------------------------------------------
-# Flag drift.
-# --------------------------------------------------------------------------
 
 CASE_ARM = re.compile(r"^\s*(-[A-Za-z0-9|_-]+)\)")
 
-# `file_issue.sh` prints these REST endpoint tails back to the caller as the
-# remedy for a link it refuses to reconcile (#14 KTD9): removing a parent, and
-# removing a blocked-by link -- which, run against the blocked issue, is also
-# how a blocks link is removed. They are GitHub's paths, not the script's
-# flags, so they cannot be parser arms.
+# REST endpoint tails file_issue.sh prints as the remedy for a refused link (#14 KTD9); GitHub's paths, not parser flags.
 GH_REMEDY_FLAGS = ("/sub_issue -F sub_issue_id=", "/dependencies/blocked_by/")
 
-# The remedy is CONSTRUCTED on a line that runs a REST delete against an issue
-# in a repo the script names by variable -- the configured one, or for a blocks
-# link the blocked issue's own. Matching that construction is what keeps this
-# allowlist honest.
-#
-# The earlier version tested `flag in script_text` -- membership in the whole
-# file, comments included -- and claimed in its own comment that this meant
-# the list "cannot be used to smuggle in a flag nothing accepts". It could:
-# `--repo`, `--label`, `--json`, `--limit`, `--owner` and `--url` all appear
-# somewhere in the script without being parser arms.
+# The remedy is built on a line running a REST delete against a script-named repo; matching that keeps the allowlist honest.
 REMEDY_CONSTRUCTION = "gh api -X DELETE repos/$"
 
 
@@ -120,9 +101,6 @@ def parser_flags(path=FILE_ISSUE, text=None):
     return flags
 
 
-# --------------------------------------------------------------------------
-# Tests
-# --------------------------------------------------------------------------
 
 class FlagsMatchTheScript(unittest.TestCase):
     """Can the script's own flag set still be parsed out of its text?

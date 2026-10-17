@@ -1,13 +1,5 @@
 #!/bin/bash
-# board.sh — run with: bash board.sh --config config.json /tmp/board.json
-#
-# --config and the output path may come in either order. --config names the
-# JSON file that supplies OWNER and PROJECT_NUMBER (see config.example.json);
-# this script no longer hardcodes a login or a project number.
-#
-# The board is read through the REST items endpoint, never GraphQL, so it
-# reads the same wherever GraphQL is refused. The output file holds one
-# compact JSON array of REST project items per page, in board order.
+# Usage: bash board.sh --config config.json OUTFILE (either order). Reads the board over REST, one JSON array per page.
 set -u
 
 CONFIG=""
@@ -34,9 +26,7 @@ esac
 
 BASE="users/$OWNER/projectsV2/$PROJECT_NUMBER"
 
-# The items endpoint's `fields` parameter takes numeric field ids, not names
-# (`fields=Status` is an HTTP 400), so the Status field's id is looked up once
-# per run. A project with no Status field is read without the parameter.
+# The items endpoint's `fields` takes numeric field ids, not names (HTTP 400), so the Status id is looked up once.
 fields=$(gh api "$BASE/fields?per_page=100") || { echo "QUERY FAILED reading the project's fields" >&2; exit 1; }
 status_id=$(printf '%s\n' "$fields" \
   | jq -r -n 'input | if type == "array" then (map(select(.name == "Status"))[0].id // empty) else error("not a field list") end') \
@@ -52,27 +42,21 @@ while :; do
   else
     path="$BASE/items?$query&after=$cursor"
   fi
-  # -i puts the status line and headers ahead of the body. The next page's
-  # cursor lives only in the Link header, and following it here, one page at a
-  # time, is what keeps the page count and the cap below. `--paginate` would
-  # follow it too, with no count and no cap.
+  # -i exposes the Link header, the only source of the next cursor; --paginate gives no page count or cap.
   raw=$(gh api -i "$path") || { echo "QUERY FAILED on page $page" >&2; exit 1; }
   headers=$(printf '%s\n' "$raw" | awk '{sub(/\r$/, "")} /^$/ {exit} {print}')
-  # An empty or non-array body would otherwise count as zero rows, and a short
-  # page reads exactly like a short board.
+  # A non-array body would count as zero rows, and a short page reads like a short board.
   printf '%s\n' "$raw" | awk 'inbody {print; next} {sub(/\r$/, "")} /^$/ {inbody=1}' \
     | jq -c -n 'input | if type == "array" then . else error("not an item array") end' >> "$OUT" 2>/dev/null \
     || { echo "QUERY FAILED on page $page — the reply is not a list of board items" >&2; exit 1; }
   next=$(printf '%s\n' "$headers" | grep -i '^link:' | tr ',' '\n' | grep 'rel="next"')
   [ -n "$next" ] || break
   cursor=$(printf '%s\n' "$next" | sed -n 's/.*[?&]after=\([^&>]*\).*/\1/p' | head -1)
-  # A next link without a cursor must not end the loop: that would be a short
-  # board with nothing to say so.
+  # A next link without a cursor must fail, not end the loop as a short board.
   [ -n "$cursor" ] || { echo "QUERY FAILED on page $page — its next-page link carries no cursor" >&2; exit 1; }
   [ "$page" -ge 20 ] && { echo "PAGE CAP HIT — pagination is not advancing" >&2; exit 1; }
 done
-# Self-check: rows must equal distinct issues. If they differ, the cursor never advanced
-# and the same page was fetched repeatedly — the board you are reading is not the board.
+# Self-check: rows != distinct issues means the cursor didn't advance and a page repeated.
 rows=$(jq -s '[.[][]] | length' "$OUT")
 uniq=$(jq -s '[.[][].content.number] | unique | length' "$OUT")
 echo "pages=$page rows=$rows distinct=$uniq" >&2
