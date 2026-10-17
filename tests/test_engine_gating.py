@@ -201,13 +201,15 @@ def issue_id(n):
     return ISSUE_ID_BASE + int(n)
 
 
-def issue_reply(n, state="open", body="", parent=None):
+def issue_reply(n, state="open", body="", parent=None, labels=()):
     """`GET repos/{repo}/issues/{n}` as GitHub returns it.
 
     `parent_issue_url` is ABSENT on a parentless issue, not null -- measured
-    2026-10-15 -- so it is added only when there is a parent.
+    2026-10-15 -- so it is added only when there is a parent. `labels` is
+    always present, as an array of label objects, empty when there are none.
     """
     d = {"id": issue_id(n), "number": int(n), "state": state, "body": body,
+         "labels": [{"name": name} for name in labels],
          "html_url": "https://github.com/jffriend/photo-consolidation/issues/%d" % int(n)}
     if parent:
         d["parent_issue_url"] = (
@@ -245,13 +247,28 @@ GRAPHQL_BLOCKED_RULE = {
     "stderr": "gh: Resource not accessible by integration (HTTP 403)\n",
 }
 
+# How a Claude Code cloud session's GitHub proxy refuses the user-owned board
+# (measured 2026-10-16, #14): every `users/{owner}/projectsV2/...` path.
+BOARD_REFUSED_RULE = {
+    "match": "projectsV2", "exit": 1, "stdout": "",
+    "stderr": ("gh: This GitHub API path is not available: sessions are bound "
+               "to their configured repositories. Use repository-scoped "
+               "endpoints (repos/{owner}/{repo}/...). (HTTP 403)\n"),
+}
+
+# The environment variable that turns cloud mode on (#14 KTD2). The harness
+# unsets it unless a test sets it, so a suite run inside a cloud session does
+# not turn every test into a cloud run (#14 KTD11).
+CLOUD_ENV_VAR = "CLAUDE_CODE_REMOTE"
+CLOUD_ENV = {CLOUD_ENV_VAR: "true"}
+
 
 class Harness:
     """A temp dir holding a body file, a fake `gh`, and its response table."""
 
     def __init__(self, body, boards=None, responses=None, probe=None,
                  board_exits=None, config=None, board_stdouts=None,
-                 fields=None, graphql_blocked=False):
+                 fields=None, graphql_blocked=False, board_refused=False):
         self.dir = Path(tempfile.mkdtemp(prefix="file_issue_test_"))
         self.body_file = self.dir / "body.md"
         self.body_file.write_text(body)
@@ -281,6 +298,10 @@ class Harness:
         # without GraphQL access does (#14 KTD10): exit 1, gh's `(HTTP 403)`
         # suffix on stderr. It goes FIRST, so no other rule can answer one.
         table = [GRAPHQL_BLOCKED_RULE] if graphql_blocked else []
+        # `board_refused` answers every board path the way a cloud session's
+        # proxy does, ahead of the board rules below.
+        if board_refused:
+            table.append(BOARD_REFUSED_RULE)
         table += [
             board_rule,
             {"match": "projectsV2/%s/fields" % project,
@@ -312,6 +333,7 @@ class Harness:
         e["PATH"] = path if path is not None else f"{self.bin}:{e['PATH']}"
         e["FAKE_GH_DIR"] = str(self.dir)
         e["FILE_ISSUE_READBACK_DELAY"] = "0"
+        e.pop(CLOUD_ENV_VAR, None)
         for k, v in (env or {}).items():
             if v is None:
                 e.pop(k, None)
@@ -1213,7 +1235,8 @@ def adopt_responses(pre_parent=None, pre_blocked=(), pre_blocking=(),
                     post_parent=None, post_blocked=(), post_blocking=(),
                     state="open", body="**Design:** none\n",
                     issue_stdout=None, write_exit=0,
-                    corroborate="", blocked_stdout=None):
+                    corroborate="", blocked_stdout=None,
+                    pre_labels=(), post_labels=(), delete_exit=0):
     """Canned replies for an adopt run.
 
     The PRE-FETCH and the READ-BACK read the same three REST paths -- the
@@ -1230,13 +1253,18 @@ def adopt_responses(pre_parent=None, pre_blocked=(), pre_blocking=(),
     """
     if issue_stdout is None:
         issue_stdout = json.dumps(issue_reply(ADOPT_NUM, state=state, body=body,
-                                              parent=pre_parent))
+                                              parent=pre_parent,
+                                              labels=pre_labels))
     if blocked_stdout is None:
         blocked_stdout = dependency_list(pre_blocked)
     return [
         {"match": ITEM_ADD_MATCH,
          "stdout": json.dumps(item_reply(200, node_id="PVTI_from_item_add"))},
         {"match": "-X POST", "stdout": "{}", "exit": write_exit},
+        # The label removal (#14 U4) names `issues/200`, so it must be
+        # answered before the issue read below.
+        {"match": "-X DELETE", "stdout": "", "exit": delete_exit,
+         "stderr": "" if delete_exit == 0 else "gh: Server Error (HTTP 500)\n"},
         {"match": POSITION_MATCH, "stdout": json.dumps({"data": {}})},
         item_read_rule(corroborate),
         {"match": READ_BLOCKED_MATCH,
@@ -1246,7 +1274,8 @@ def adopt_responses(pre_parent=None, pre_blocked=(), pre_blocking=(),
         {"match": READ_ISSUE_MATCH,
          "stdouts": [issue_stdout,
                      json.dumps(issue_reply(ADOPT_NUM, state=state, body=body,
-                                            parent=post_parent))]},
+                                            parent=post_parent,
+                                            labels=post_labels))]},
         *referenced_issue_rules(),
     ]
 
@@ -1747,6 +1776,7 @@ READ_BACK_END = "# <<< SHARED READ-BACK END"
 COMPARISON_TOKENS = (
     "BOARD2_NUMS", "IDX2", "REL_JSON", "PARENT_READ",
     "BLOCKED_READ", "BLOCKED_WANT", "BLOCKING_READ", "BLOCKING_WANT",
+    "LABEL_READ",
 )
 
 
@@ -3659,6 +3689,320 @@ class GraphQLBlocked(unittest.TestCase):
         self.assertIn("164", r.stdout)
         self.assertTrue(wrote_nothing(self.h))
         self.assertFalse([c for c in self.h.calls() if "graphql" in " ".join(c)])
+
+
+# ---------------------------------------------------------------------------
+# #14 cloud mode. A Claude Code cloud session's proxy refuses the user-owned
+# board, so cloud mode (CLAUDE_CODE_REMOTE=true, or --no-board) never reads or
+# writes it: the position is decided later, the issue carries the needs-board
+# label, and everything the run wrote is read back.
+# ---------------------------------------------------------------------------
+
+PENDING_LABEL = "needs-board"
+# Stands in for the body file in an argument list built before the harness
+# that owns the file exists; CloudModeLabel._cloud swaps it in.
+BODY = object()
+
+
+def cloud_create_responses(post_labels=("work", PENDING_LABEL), blocked_by=(),
+                           blocking=(), parent=None):
+    """A cloud create's replies: the create, the link writes, and the three
+    relationship reads of #200. There is no board rule -- the harness refuses
+    every board path -- and the issue read carries the labels the read-back
+    checks."""
+    return [
+        {"match": "issues -f title=", "stdout": json.dumps(issue_reply(200))},
+        {"match": "-X POST", "stdout": "{}"},
+        {"match": READ_BLOCKED_MATCH, "stdout": dependency_list(blocked_by)},
+        {"match": READ_BLOCKING_MATCH, "stdout": dependency_list(blocking)},
+        {"match": READ_ISSUE_MATCH,
+         "stdout": json.dumps(issue_reply(200, parent=parent,
+                                          labels=post_labels))},
+        *referenced_issue_rules(),
+    ]
+
+
+def touched_the_board(h):
+    """Every call that reached the board or GraphQL."""
+    return [c for c in h.calls()
+            if "projectsV2" in " ".join(c) or "graphql" in " ".join(c)]
+
+
+def label_writes(h):
+    """Every label add: `gh api -X POST repos/{repo}/issues/{n}/labels`."""
+    return [c for c in h.calls()
+            if c[:3] == ["api", "-X", "POST"] and len(c) > 3
+            and c[3].endswith("/labels")]
+
+
+def label_deletes(h):
+    """Every label removal: `gh api -X DELETE .../issues/{n}/labels/{name}`."""
+    return [c for c in h.calls()
+            if c[:3] == ["api", "-X", "DELETE"] and len(c) > 3
+            and "/labels/" in c[3]]
+
+
+class CloudModeSwitch(unittest.TestCase):
+    """#14 U1: cloud mode is decided before any network call, and it changes
+    which position answers a run accepts (R1-R7)."""
+
+    def setUp(self):
+        self.h = Harness("**Design:** none\n", board_refused=True,
+                         responses=cloud_create_responses())
+
+    def _refused(self, *args, env=None):
+        r = self.h.run(*full_args(self.h.body_file), "--no-parent", *args,
+                       env=env)
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        self.assertFalse(self.h.network_calls(),
+                         "the refusal must come before any network call")
+        return r.stdout + r.stderr
+
+    def test_after_in_cloud_mode_is_refused_naming_position_later(self):
+        # Covers AE2.
+        out = self._refused("--after", "12", env=CLOUD_ENV)
+        self.assertIn("--position-later", out)
+
+    def test_top_with_no_board_is_refused_naming_position_later(self):
+        out = self._refused("--no-board", "--top")
+        self.assertIn("--position-later", out)
+
+    def test_cloud_mode_with_no_position_answer_is_refused(self):
+        out = self._refused(env=CLOUD_ENV)
+        self.assertIn("--position-later", out)
+
+    def test_position_later_outside_cloud_mode_is_refused(self):
+        out = self._refused("--position-later")
+        self.assertIn("cloud mode", out)
+        self.assertIn("--after", out)
+
+    def test_only_the_exact_value_true_turns_cloud_mode_on(self):
+        for value in ("false", "1", "TRUE", ""):
+            h = Harness("**Design:** none\n", responses=create_responses([], []))
+            r = h.run(*full_args(h.body_file), "--no-parent", "--top",
+                      "--dry-run", env={CLOUD_ENV_VAR: value})
+            self.assertEqual(0, r.returncode, (value, r.stdout + r.stderr))
+            self.assertNotIn("cloud mode", r.stdout, value)
+            self.assertIn("BOARD NEIGHBOURHOOD", r.stdout, value)
+
+    def test_the_cloud_line_names_both_triggers_before_the_gh_probe(self):
+        r = self.h.run(*full_args(self.h.body_file), "--no-parent",
+                       "--position-later", "--no-board", "--dry-run",
+                       env=CLOUD_ENV)
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        lines = r.stdout.splitlines()
+        cloud = [i for i, line in enumerate(lines) if line.startswith("cloud mode")]
+        probe = [i for i, line in enumerate(lines) if line.startswith("gh capability")]
+        self.assertTrue(cloud and probe, r.stdout)
+        self.assertLess(cloud[0], probe[0])
+        self.assertIn(CLOUD_ENV_VAR, lines[cloud[0]])
+        self.assertIn("--no-board", lines[cloud[0]])
+
+
+class CloudModeSkipsTheBoard(unittest.TestCase):
+    """#14 U2: a cloud run never touches the board or GraphQL (R10), says so
+    in its read-back (R13) and its dry run (R11), and a local run whose board
+    is refused still stops (R3)."""
+
+    def _create(self, *extra, responses=None, parent=("--no-parent",)):
+        self.h = Harness("**Design:** none\n", board_refused=True,
+                         graphql_blocked=True,
+                         responses=responses or cloud_create_responses())
+        return self.h.run(*full_args(self.h.body_file), *parent,
+                          "--position-later", *extra, env=CLOUD_ENV)
+
+    def test_a_cloud_create_never_calls_the_board_or_graphql(self):
+        r = self._create()
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertEqual([], touched_the_board(self.h))
+
+    def test_the_cloud_read_back_says_the_board_was_not_checked(self):
+        r = self._create()
+        self.assertIn("board membership   not checked (cloud mode)", r.stdout)
+        self.assertIn("board position     not checked (cloud mode)", r.stdout)
+        self.assertNotIn("board membership   ok", r.stdout)
+        self.assertNotIn("board position     ok", r.stdout)
+
+    def test_a_cloud_dry_run_shows_duplicates_and_no_neighbourhood(self):
+        # Covers AE6.
+        r = self._create("--dry-run")
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertIn("not available in cloud mode", r.stdout)
+        self.assertIn("POSSIBLE DUPLICATES: none found", r.stdout)
+        self.assertTrue(wrote_nothing(self.h))
+        self.assertEqual([], touched_the_board(self.h))
+
+    def test_a_refused_board_still_stops_a_local_run(self):
+        # Covers AE3.
+        h = Harness("**Design:** none\n", board_refused=True,
+                    responses=create_responses([], []))
+        r = h.run(*full_args(h.body_file), "--no-parent", "--after", "101")
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        self.assertIn("the board listing is not trustworthy", r.stderr)
+        self.assertTrue(wrote_nothing(h))
+
+    def test_a_cloud_adopt_shows_the_issues_own_title(self):
+        reply = issue_reply(ADOPT_NUM, body="**Design:** none\n",
+                            labels=(PENDING_LABEL,))
+        reply["title"] = "An existing issue being wired"
+        h = Harness("**Design:** none\n", board_refused=True,
+                    responses=adopt_responses(issue_stdout=json.dumps(reply),
+                                              post_labels=(PENDING_LABEL,)))
+        r = h.run(*adopt_args(), "--no-parent", "--position-later", env=CLOUD_ENV)
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertIn("#200 An existing issue being wired", r.stdout)
+        self.assertEqual([], touched_the_board(h))
+
+    def test_a_cloud_refusal_hands_back_a_command_the_cloud_accepts(self):
+        # Asked for a parent that does not read back: half-wired, with the
+        # adopt re-run as its remedy.
+        r = self._create(parent=("--parent", "55"))
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        self.assertIn("--position-later", r.stderr)
+        self.assertNotIn("--after", r.stderr)
+        self.assertNotIn("--top", r.stderr)
+
+
+class CloudModeLabel(unittest.TestCase):
+    """#14 U3: every cloud-filed or cloud-adopted issue carries needs-board,
+    proven by the read-back, and the run says it is not on the board (R8, R9,
+    R12, R14)."""
+
+    def _cloud(self, responses, *args):
+        """Runs in cloud mode; a BODY argument becomes the harness's body file."""
+        self.h = Harness("**Design:** none\n", board_refused=True,
+                         responses=responses)
+        args = [str(self.h.body_file) if a == str(BODY) else a for a in args]
+        return self.h.run(*args, env=CLOUD_ENV)
+
+    def test_a_cloud_create_sends_the_label_in_the_create_and_reads_it_back(self):
+        # Covers AE1.
+        r = self._cloud(cloud_create_responses(parent=55, blocking=(122,)),
+                        *full_args(BODY, **{"--blocks": "122"}),
+                        "--parent", "55", "--position-later")
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        create = create_argv(self.h)
+        self.assertIn("labels[]=work", create)
+        self.assertIn("labels[]=%s" % PENDING_LABEL, create)
+        self.assertEqual([], label_writes(self.h),
+                         "a create carries the label in the create itself")
+        self.assertIn("parent             ok (#55)", r.stdout)
+        self.assertIn("blocks             ok (122)", r.stdout)
+        self.assertIn("needs-board        ok (present)", r.stdout)
+        self.assertIn("#200 is created", r.stdout)
+        self.assertIn("NOT on the board", r.stdout)
+        self.assertIn("NOT ON THE BOARD", r.stderr)
+
+    def test_a_cloud_adopt_of_a_labeled_issue_writes_no_label(self):
+        # Covers AE4.
+        r = self._cloud(adopt_responses(pre_parent=55, post_parent=55,
+                                        post_blocking=(122,),
+                                        pre_labels=(PENDING_LABEL,),
+                                        post_labels=(PENDING_LABEL,)),
+                        *adopt_args(**{"--blocks": "122"}), "--parent", "55",
+                        "--position-later")
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertEqual([], label_writes(self.h))
+        self.assertEqual(
+            [("122/dependencies/blocked_by", "issue_id=%d" % issue_id(200))],
+            link_writes(self.h))
+        self.assertIn("needs-board        ok (present)", r.stdout)
+
+    def test_a_cloud_adopt_of_an_unlabeled_issue_adds_the_label_once(self):
+        r = self._cloud(adopt_responses(post_labels=(PENDING_LABEL,)),
+                        *adopt_args(), "--no-parent", "--position-later")
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        writes = label_writes(self.h)
+        self.assertEqual(1, len(writes), writes)
+        self.assertIn("labels[]=%s" % PENDING_LABEL, writes[0])
+        self.assertIn("needs-board        ok (present)", r.stdout)
+
+    def test_a_label_missing_after_a_cloud_create_is_refused(self):
+        r = self._cloud(cloud_create_responses(post_labels=("work",)),
+                        *full_args(BODY), "--no-parent",
+                        "--position-later")
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        self.assertIn(PENDING_LABEL, r.stderr)
+        self.assertIn("absent", r.stderr)
+        self.assertNotIn("needs-board        ok", r.stdout)
+
+    def test_a_read_back_reply_with_no_labels_list_is_unreadable(self):
+        reply = issue_reply(200)
+        del reply["labels"]
+        r = self._cloud(override(cloud_create_responses(), READ_ISSUE_MATCH,
+                                 stdout=json.dumps(reply)),
+                        *full_args(BODY), "--no-parent",
+                        "--position-later")
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        self.assertIn("unrecognised shape", r.stderr)
+        self.assertNotIn("needs-board        ok", r.stdout)
+
+    def test_a_local_create_carries_no_pending_label(self):
+        h = Harness("**Design:** none\n",
+                    boards=[PRE_BOARD, [(200, "x")] + PRE_BOARD],
+                    responses=create_responses([], []))
+        r = h.run(*full_args(h.body_file), "--no-parent", "--top")
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertNotIn("labels[]=%s" % PENDING_LABEL, create_argv(h))
+        self.assertNotIn(PENDING_LABEL, r.stdout)
+
+
+class LocalPlacementClearsTheLabel(unittest.TestCase):
+    """#14 U4: a local adopt that places a needs-board issue removes the label
+    once the placement reads back, and proves it is gone (R15, R16)."""
+
+    def _adopt(self, *extra, responses=None, **kw):
+        self.h = Harness("**Design:** none\n",
+                         boards=[ADOPT_PRE_BOARD, ADOPT_POST_BOARD],
+                         responses=responses or adopt_responses(**kw))
+        return self.h.run(*adopt_args(), "--no-parent", "--after", "101", *extra)
+
+    def test_placing_a_labeled_issue_removes_the_label_and_proves_it(self):
+        # Covers AE5.
+        r = self._adopt(pre_labels=(PENDING_LABEL,), post_labels=())
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        deletes = label_deletes(self.h)
+        self.assertEqual(1, len(deletes), deletes)
+        self.assertTrue(deletes[0][3].endswith("issues/200/labels/%s" % PENDING_LABEL),
+                        deletes[0])
+        self.assertIn("needs-board        removed", r.stdout)
+
+    def test_a_failed_removal_warns_and_still_exits_0(self):
+        r = self._adopt(pre_labels=(PENDING_LABEL,), post_labels=(PENDING_LABEL,),
+                        delete_exit=1)
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertIn("gh api -X DELETE repos/jffriend/photo-consolidation/"
+                      "issues/200/labels/%s" % PENDING_LABEL, r.stderr)
+        self.assertNotIn("MISMATCH", r.stderr)
+        self.assertNotIn("needs-board        removed", r.stdout)
+
+    def test_a_removal_that_does_not_read_back_warns(self):
+        r = self._adopt(pre_labels=(PENDING_LABEL,), post_labels=(PENDING_LABEL,))
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertEqual(1, len(label_deletes(self.h)))
+        self.assertIn("gh api -X DELETE repos/jffriend/photo-consolidation/"
+                      "issues/200/labels/%s" % PENDING_LABEL, r.stderr)
+        self.assertNotIn("needs-board        removed", r.stdout)
+
+    def test_an_unlabeled_issue_gets_no_label_removal(self):
+        r = self._adopt()
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertEqual([], label_deletes(self.h))
+
+    def test_a_labeled_issue_whose_position_is_not_set_keeps_its_label(self):
+        responses = override(adopt_responses(pre_labels=(PENDING_LABEL,),
+                                             post_labels=(PENDING_LABEL,)),
+                             POSITION_MATCH, **POSITION_403)
+        r = self._adopt(responses=responses)
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertIn("board position     NOT SET", r.stdout)
+        self.assertEqual([], label_deletes(self.h))
+
+    def test_a_dry_run_of_a_labeled_issue_removes_nothing(self):
+        r = self._adopt("--dry-run", pre_labels=(PENDING_LABEL,))
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertEqual([], label_deletes(self.h))
+        self.assertTrue(wrote_nothing(self.h))
 
 
 if __name__ == "__main__":
