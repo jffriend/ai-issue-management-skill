@@ -78,16 +78,18 @@ than a small fix, or needs a decision you cannot make here.
 Do not create an issue, and do not set where one sits, with the GitHub CLI
 directly. Where an issue sits is its board membership and position, its
 parent, and its blocked-by and blocks links. Not `gh issue create`, not
-`gh issue edit` with `--parent` or a blocked-by or blocking flag, not any
+`gh issue edit` with `--parent`, `--add-project`, `--remove-project`, or a
+blocked-by or blocking flag, not any
 `gh project` command, and not their `gh api` equivalents. They write what
 you asked for and stop, leaving every other relationship for a later step
 that may not come. That is not a style preference — it is the reason this tool exists: a written rule alone did not
 hold, in a session that had just read it.
 
 This skill never writes to the board itself. It drives the engine, and the
-engine does every placement write. The one exception is a command the
-engine prints for you to run, such as the `gh api -X DELETE` that clears a
-link adopt refused.
+engine does every placement write. The one exception is a `gh api -X DELETE`
+the engine prints to clear a link adopt refused. Run it only when the caller
+has decided that link should go, then re-run the adopt so its read-back
+confirms what is left.
 
 **Editing an existing issue's title, body or labels is outside this rule**
 until the engine supports those edits. Follow {{CONVENTIONS_DOC}} for them.
@@ -316,11 +318,14 @@ it.
 rule"), and tell
   the caller which issue you commented on. Then check that the match is on
   the board: build an adopt of it (Step 2) with the placement answers you
-  already have for this work, and run it with `--dry-run`. If its position
-  line says `not currently on the board`, run that adopt the way Step 3
-  says, so the work is on the board. If the line says it is already on the
-  board, leave it where it is. In a cloud session the board cannot be read:
-  tell the caller to check from a local session.
+  already have for this work, and run it with `--dry-run`. If it refuses
+  because the match has links you did not name, add those links to your
+  answers and dry-run again; never run the `DELETE` commands it prints, as
+  those links belong to the match. If its position line says `not currently
+  on the board`, run that adopt the way Step 3 says, so the work is on the
+  board. If it names a current position, the match is on the board: do not
+  run the adopt. In a cloud session the board cannot be read: tell the
+  caller to check from a local session.
 - **You are not sure.** File nothing. Tell the caller the matches by number
   and title, and offer to file anyway, which means re-running the same command
   with `--file-anyway`. Then carry on with the session's other work.
